@@ -1,7 +1,7 @@
 # api/webhooks.py
 
 from fastapi import APIRouter, Request, Response, Header
-from services.shopify_client import shopify_client as verify_webhook
+from services.shopify_client import shopify_client
 from services.used_book_manager import process_inventory_change
 import logging
 import json
@@ -21,7 +21,7 @@ async def handle_inventory_level_update(
 
     try:
         raw_body = await request.body()
-        is_valid = verify_webhook(hmac=x_shopify_hmac_sha256, data=raw_body)
+        is_valid = shopify_client.verify_webhook(hmac=x_shopify_hmac_sha256, data=raw_body)
 
         if not is_valid:
             logger.error("Invalid webhook signature")

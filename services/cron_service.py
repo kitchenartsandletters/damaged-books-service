@@ -1,6 +1,6 @@
 # services/cron_service.py
 
-from services.shopify_client import shopify_client as get, post, delete
+from services.shopify_client import shopify_client
 from services.used_book_manager import process_inventory_change
 from services.backup_service import backup_redirects
 from services.notification_service import notify_critical_error
@@ -17,7 +17,7 @@ async def get_all_hurt_books(max_items: int = None, quick_load: bool = False):
     """
     try:
         if quick_load:
-            response = await get("products.json", params={"limit": 50})
+            response = await shopify_client.get("products.json", params={"limit": 50})
             products = response.get("products", [])
             hurt_books = [p for p in products if "-hurt-" in p.get("handle", "")]
             logger.info(f"Quick loaded {len(hurt_books)} hurt books")
@@ -36,7 +36,7 @@ async def get_all_hurt_books(max_items: int = None, quick_load: bool = False):
             if next_page_token:
                 params["page_info"] = next_page_token
 
-            response = await get("products.json", params=params)
+            response = await shopify_client.get("products.json", params=params)
             batch = response.get("products", [])
             headers = response.get("headers", {})
 

@@ -1,7 +1,7 @@
 # services/redirect_service.py
 
 import logging
-from services.shopify_client import shopify_client as get, post, delete
+from services.shopify_client import shopify_client
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +13,7 @@ async def find_redirect_by_path(path: str) -> dict | None:
     Returns the first matching redirect, or None.
     """
     try:
-        response = await get("redirects.json", params={"path": f"/products/{path}"})
+        response = await shopify_client.get("redirects.json", params={"path": f"/products/{path}"})
         redirects = response.get("redirects", [])
         
         if not redirects:
@@ -39,7 +39,7 @@ async def create_redirect(hurt_book_path: str, target_path: str) -> dict | None:
                 "redirect_type": "302"
             }
         }
-        response = await post("redirects.json", json=payload)
+        response = await shopify_client.post("redirects.json", json=payload)
         logger.info(f"Created redirect from {hurt_book_path} to {target_path}")
         return response.get("redirect")
 
@@ -57,7 +57,7 @@ async def delete_redirect(redirect_id: str) -> bool:
             logger.warning("Attempted to delete redirect with null or undefined ID")
             return False
 
-        await delete(f"redirects/{redirect_id}.json")
+        await shopify_client.delete(f"redirects/{redirect_id}.json")
         logger.info(f"Deleted redirect {redirect_id}")
         return True
 
@@ -68,15 +68,14 @@ async def delete_redirect(redirect_id: str) -> bool:
 async def get_all_redirects() -> list:
     # This function will call Shopify API: GET /admin/api/2023-07/redirects.json
     # Example implementation placeholder
-    from services.shopify_client import shopify_client as get
 
     endpoint = "/redirects.json"
-    result = await get(endpoint)
+    result = await shopify_client.get(endpoint)
     return result.get("redirects", [])
 
 async def get_redirect_by_id(redirect_id: str) -> dict:
     try:
-        response = await get(f"{REDIRECTS_ENDPOINT}/{redirect_id}")
+        response = await shopify_client.get(f"{REDIRECTS_ENDPOINT}/{redirect_id}")
         return response.get("redirect") if response else None
     except Exception as e:
         logger.error(f"Failed to fetch redirect with ID {redirect_id}: {str(e)}")

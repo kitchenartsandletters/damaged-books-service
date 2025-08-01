@@ -6,7 +6,6 @@ from services import notification_service
 
 logger = logging.getLogger(__name__)
 
-
 async def process_inventory_change(inventory_item_id: str, variant_id: str, product_id: str) -> dict:
     try:
         # Get product details
