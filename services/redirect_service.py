@@ -1,10 +1,11 @@
 # services/redirect_service.py
 
 import logging
-from services.shopify_client import get, post, delete
+from services.shopify_client import shopify_client as get, post, delete
 
 logger = logging.getLogger(__name__)
 
+REDIRECTS_ENDPOINT = "/redirects"
 
 async def find_redirect_by_path(path: str) -> dict | None:
     """
@@ -67,8 +68,16 @@ async def delete_redirect(redirect_id: str) -> bool:
 async def get_all_redirects() -> list:
     # This function will call Shopify API: GET /admin/api/2023-07/redirects.json
     # Example implementation placeholder
-    from services.shopify_client import shopify_get
+    from services.shopify_client import shopify_client as get
 
     endpoint = "/redirects.json"
-    result = await shopify_get(endpoint)
+    result = await get(endpoint)
     return result.get("redirects", [])
+
+async def get_redirect_by_id(redirect_id: str) -> dict:
+    try:
+        response = await get(f"{REDIRECTS_ENDPOINT}/{redirect_id}")
+        return response.get("redirect") if response else None
+    except Exception as e:
+        logger.error(f"Failed to fetch redirect with ID {redirect_id}: {str(e)}")
+        return None

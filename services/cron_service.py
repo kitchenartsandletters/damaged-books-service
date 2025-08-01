@@ -1,6 +1,6 @@
 # services/cron_service.py
 
-from services.shopify_client import get
+from services.shopify_client import shopify_client as get, post, delete
 from services.used_book_manager import process_inventory_change
 from services.backup_service import backup_redirects
 from services.notification_service import notify_critical_error

@@ -2,7 +2,7 @@
 
 import logging
 from services import product_service, redirect_service, seo_service, inventory_service
-from utils import notification_service
+from services import notification_service
 
 logger = logging.getLogger(__name__)
 
@@ -86,3 +86,22 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             "context": "Inventory change processing"
         })
         raise
+
+async def scan_all_used_books():
+    # Placeholder — real logic would pull all products via Shopify and process each
+    logging.info("Starting full used book inventory scan...")
+
+    # Example: fake batch of product IDs
+    dummy_products = [
+        {"product_id": "gid://shopify/Product/123", "variant_id": "456", "inventory_item_id": "789"},
+        # Add more...
+    ]
+
+    for entry in dummy_products:
+        await process_inventory_change(
+            inventory_item_id=entry["inventory_item_id"],
+            variant_id=entry["variant_id"],
+            product_id=entry["product_id"],
+        )
+
+    logging.info("Used book inventory scan completed.")

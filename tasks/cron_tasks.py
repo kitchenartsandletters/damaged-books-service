@@ -6,6 +6,7 @@ from services.used_book_manager import process_inventory_change
 from services.backup_service import backup_redirects
 from services.notification_service import notify_critical_error
 import logging
+import asyncio
 
 logger = logging.getLogger(__name__)
 

@@ -109,10 +109,10 @@ async def get_redirects():
 @router.get("/api/products")
 async def get_products(page: int = Query(1, gt=0), limit: int = Query(20, le=100)):
     try:
-        from services.shopify_client import shopify_get
+        from services.shopify_client import shopify_client as get
 
         endpoint = f"/products.json?limit={limit}&page={page}"
-        response = await shopify_get(endpoint)
+        response = await get(endpoint)
 
         return {
             "success": True,
@@ -129,10 +129,10 @@ async def get_products(page: int = Query(1, gt=0), limit: int = Query(20, le=100
 @router.get("/api/products/{product_id}")
 async def get_product(product_id: str):
     try:
-        from services.shopify_client import shopify_get
+        from services.shopify_client import shopify_client as get
 
         endpoint = f"/products/{product_id}.json"
-        response = await shopify_get(endpoint)
+        response = await get(endpoint)
 
         return {
             "success": True,

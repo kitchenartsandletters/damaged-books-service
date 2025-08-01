@@ -1,6 +1,9 @@
 # api/system.py
 
-from fastapi import APIRouter
+import logging
+from fastapi import APIRouter, HTTPException
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -11,7 +14,7 @@ async def health_check():
 @router.get("/api/shopify/test")
 async def test_shopify_connection():
     try:
-        from services.shopify_client import shopify_get
+        from services.shopify_client import shopify_client as shopify_get
 
         # Minimal endpoint to confirm API connectivity
         response = await shopify_get("/shop.json")
