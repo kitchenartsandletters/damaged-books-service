@@ -3,7 +3,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import router as app_router
-from services.used_book_manager import used_book_manager  # Adjust import path as needed
 from fastapi.responses import JSONResponse
 
 # Import routers
