@@ -10,12 +10,12 @@ from services import used_book_manager
 from services import redirect_service
 from pydantic import BaseModel
 import logging
-from config import settings
+from config import get_settings
 from services.shopify_client import shopify_client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
+settings = get_settings()
 
 class ProductCheckRequest(BaseModel):
     product_id: str
