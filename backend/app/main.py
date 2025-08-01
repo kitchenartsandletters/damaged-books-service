@@ -1,11 +1,14 @@
 # backend/app/main.py
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import router as app_router
+from .routes import router as app_router
+from services.used_book_manager import used_book_manager  # Adjust import path as needed
+from fastapi.responses import JSONResponse
 
 # Import routers
 from api import system
+from app import routes  # Importing app routes
 # Future imports: webhook, products, redirects, status, etc.
 
 app = FastAPI(
@@ -24,9 +27,10 @@ app.add_middleware(
 )
 
 # Register routers
-app.include_router(system.router)
+app.include_router(system.router, tags=["System"])
+app.include_router(routes.router, tags=["Main"])
 app.include_router(app_router)
-
+    
 # Optional root route
 @app.get("/")
 def root():
