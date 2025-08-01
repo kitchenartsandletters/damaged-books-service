@@ -8,7 +8,6 @@ from fastapi.responses import JSONResponse
 
 # Import routers
 from api import system
-from app import routes  # Importing app routes
 # Future imports: webhook, products, redirects, status, etc.
 
 app = FastAPI(
