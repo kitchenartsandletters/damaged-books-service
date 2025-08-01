@@ -1,0 +1,25 @@
+# .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.env
+.env*
+!env.template  # keep a template in version control
+
+# Node (in case frontend lives here later)
+node_modules/
+dist/
+build/
+*.log
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+
+# Railway + Local
+railway.json
+*.sqlite3
