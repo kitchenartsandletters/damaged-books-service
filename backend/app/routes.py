@@ -10,6 +10,7 @@ from services import used_book_manager
 from services import redirect_service
 from pydantic import BaseModel
 import logging
+from config import settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -47,8 +48,8 @@ async def handle_inventory_webhook(request: Request):
     if not hmac_header:
         raise HTTPException(status_code=400, detail="Missing HMAC header")
 
-    # Get Shopify secret key from environment
-    shopify_secret = os.getenv("SHOPIFY_WEBHOOK_SECRET")
+    # Get Shopify secret key from centralized config
+    shopify_secret = settings.SHOPIFY_API_SECRET
     if not shopify_secret:
         raise HTTPException(status_code=500, detail="Missing server secret for webhook validation")
 
@@ -104,28 +105,6 @@ async def get_redirects():
     except Exception as e:
         logger.error(f"Failed to fetch redirects: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to fetch redirects")
-    
-@router.get("/api/shopify/test")
-async def test_shopify_connection():
-    try:
-        from services.shopify_client import shopify_get
-
-        # Minimal endpoint to confirm API connectivity
-        response = await shopify_get("/shop.json")
-        shop_info = response.get("shop", {})
-
-        return {
-            "success": True,
-            "shop": {
-                "name": shop_info.get("name"),
-                "domain": shop_info.get("domain"),
-                "myshopify_domain": shop_info.get("myshopify_domain"),
-            },
-        }
-
-    except Exception as e:
-        logger.error(f"Shopify test connection failed: {str(e)}")
-        raise HTTPException(status_code=500, detail="Unable to reach Shopify API")
     
 @router.get("/api/products")
 async def get_products(page: int = Query(1, gt=0), limit: int = Query(20, le=100)):

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 SHOP_URL = settings.SHOP_URL
 SHOPIFY_ACCESS_TOKEN = settings.SHOPIFY_ACCESS_TOKEN
-WEBHOOK_SECRET = settings.SHOPIFY_WEBHOOK_SECRET
+SHOPIFY_API_SECRET = settings.SHOPIFY_API_SECRET
 
 API_VERSION = "2025-01"
 
@@ -90,7 +90,7 @@ class ShopifyClient:
 
     def verify_webhook(self, hmac_header: str, data: bytes) -> bool:
         digest = hmac.new(
-            WEBHOOK_SECRET.encode("utf-8"),
+            SHOPIFY_API_SECRET.encode("utf-8"),
             msg=data,
             digestmod=hashlib.sha256
         ).digest()
