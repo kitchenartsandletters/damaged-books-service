@@ -27,7 +27,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(system.router, tags=["System"])
-app.include_router(routes.router, tags=["Main"])
+app.include_router(app_router, tags=["Main"])
 app.include_router(app_router)
     
 # Optional root route

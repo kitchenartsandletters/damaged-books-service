@@ -1,4 +1,4 @@
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
 from functools import lru_cache
 
 class Settings(BaseSettings):
@@ -6,7 +6,6 @@ class Settings(BaseSettings):
     SHOPIFY_API_KEY: str
     SHOPIFY_API_SECRET: str
     SHOPIFY_ACCESS_TOKEN: str
-    HMAC_SECRET: str
 
     class Config:
         env_file = ".env"
