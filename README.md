@@ -1,8 +1,8 @@
-Here’s your comprehensive README.md for the refactored damaged-books-service:
+Here’s your comprehensive README.md for the refactored used-books-service:
 
 # Damaged Books Service
 
-This service manages the automated publication and redirection logic for **used/damaged books** in a Shopify store. When inventory status changes, the system determines whether to publish or unpublish the product, set SEO canonicals, and create or remove redirects as appropriate.
+This service manages the automated publication and redirection logic for **used books** in a Shopify store. When inventory status changes, the system determines whether to publish or unpublish the product, set SEO canonicals, and create or remove redirects as appropriate.
 
 ---
 
