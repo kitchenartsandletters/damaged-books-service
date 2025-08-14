@@ -41,7 +41,7 @@ def verify_shopify_hmac(hmac_header: str, body: bytes, secret: str) -> bool:
 
 @router.post("/webhooks/inventory-levels")
 async def handle_inventory_webhook(request: Request):
-    # 1) Read raw body and verify HMAC (your existing code)
+    # 1) Read raw body and verify HMAC
     raw_body = await request.body()
     hmac_header = request.headers.get("X-Shopify-Hmac-Sha256")
     if not hmac_header:
@@ -64,19 +64,19 @@ async def handle_inventory_webhook(request: Request):
     if not inventory_item_id:
         raise HTTPException(status_code=400, detail="Missing inventory_item_id")
 
-    inventory_item_id = data.get("inventory_item_id")
-    if not inventory_item_id:
-        raise HTTPException(status_code=400, detail="Missing inventory_item_id")
-
     try:
-        # 🔎 Correct way with your client: use 'query', not 'params'
+        # 🔎 Use the client helper that accepts 'query' under the hood
         variants = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
 
+        # Debug: how many did we get?
+        logger.info(f"[Inventory Lookup] variants_count={len(variants)} for inventory_item_id={inventory_item_id}")
+
         if not variants:
-            return JSONResponse(status_code=200, content={
-                "status": "no-op",
-                "reason": f"no variant found for inventory_item_id={inventory_item_id}"
-            })
+            # 200 → no-op so Shopify doesn’t retry
+            return JSONResponse(
+                status_code=200,
+                content={"status": "no-op", "reason": f"no variant found for inventory_item_id={inventory_item_id}"}
+            )
 
         variant = variants[0]
         variant_id = str(variant["id"])
@@ -91,6 +91,7 @@ async def handle_inventory_webhook(request: Request):
 
     except Exception as e:
         logger.error(f"Error processing inventory update: {str(e)}")
+        # 200 avoids Shopify retries on app errors
         return JSONResponse(status_code=200, content={"status": "error", "detail": str(e)})
 
 @router.post("/api/products/check")
