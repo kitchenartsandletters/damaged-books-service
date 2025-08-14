@@ -68,6 +68,11 @@ async def handle_inventory_webhook(request: Request):
     try:
         endpoint = f"variants.json?inventory_item_ids={inventory_item_id}"
         variant_resp = await shopify_client.get(endpoint)  # <- no params kwarg
+        logger.info(f"[Inventory Lookup] endpoint={endpoint}")
+        logger.info(f"[Inventory Lookup] response keys={list(variant_resp.keys())}")
+        logger.info(f"[Inventory Lookup] variants_count={len(variant_resp.get('variants', []))}")
+        if not variant_resp.get("variants"):
+            logger.info(f"[Inventory Lookup] raw response={variant_resp}")
         variants = variant_resp.get("variants", [])
         if not variants:
             # Nothing to process; 200 so Shopify doesn’t retry
