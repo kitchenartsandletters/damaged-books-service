@@ -64,18 +64,15 @@ async def handle_inventory_webhook(request: Request):
     if not inventory_item_id:
         raise HTTPException(status_code=400, detail="Missing inventory_item_id")
 
-    # 3) Look up variant/product by inventory_item_id (no `params` kwarg)
+    inventory_item_id = data.get("inventory_item_id")
+    if not inventory_item_id:
+        raise HTTPException(status_code=400, detail="Missing inventory_item_id")
+
     try:
-        endpoint = f"variants.json?inventory_item_ids={inventory_item_id}"
-        variant_resp = await shopify_client.get(endpoint)  # <- no params kwarg
-        logger.info(f"[Inventory Lookup] endpoint={endpoint}")
-        logger.info(f"[Inventory Lookup] response keys={list(variant_resp.keys())}")
-        logger.info(f"[Inventory Lookup] variants_count={len(variant_resp.get('variants', []))}")
-        if not variant_resp.get("variants"):
-            logger.info(f"[Inventory Lookup] raw response={variant_resp}")
-        variants = variant_resp.get("variants", [])
+        # 🔎 Correct way with your client: use 'query', not 'params'
+        variants = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
+
         if not variants:
-            # Nothing to process; 200 so Shopify doesn’t retry
             return JSONResponse(status_code=200, content={
                 "status": "no-op",
                 "reason": f"no variant found for inventory_item_id={inventory_item_id}"
@@ -85,7 +82,6 @@ async def handle_inventory_webhook(request: Request):
         variant_id = str(variant["id"])
         product_id = str(variant["product_id"])
 
-        # 4) Proceed to business logic
         result = await used_book_manager.process_inventory_change(
             inventory_item_id=str(inventory_item_id),
             variant_id=variant_id,
@@ -94,7 +90,6 @@ async def handle_inventory_webhook(request: Request):
         return JSONResponse(status_code=200, content={"status": "success", "result": result})
 
     except Exception as e:
-        # Log and return 200 to avoid Shopify retries on server faults
         logger.error(f"Error processing inventory update: {str(e)}")
         return JSONResponse(status_code=200, content={"status": "error", "detail": str(e)})
 

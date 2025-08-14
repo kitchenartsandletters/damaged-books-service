@@ -35,6 +35,20 @@ class ShopifyClient:
             "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
         }
 
+    async def get_variants_by_inventory_item_id(self, inventory_item_id: int) -> list:
+        """
+        Convenience helper for:
+        GET /admin/api/{ver}/variants.json?inventory_item_ids=<id>
+        Returns the 'variants' array ([] if none).
+        """
+        resp = await self.get(
+            "variants.json",
+            query={"inventory_item_ids": inventory_item_id}
+        )
+        # resp shape per _request(): { "status": int, "body": dict, "headers": dict }
+        body = resp.get("body", {}) if isinstance(resp, dict) else {}
+        return body.get("variants", [])
+
     def _build_url(self, path: str, query: Optional[Dict[str, Any]] = None) -> str:
         url = f"{self.base_url}/{path.lstrip('/')}"
         if query:
