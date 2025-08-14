@@ -48,6 +48,16 @@ class ShopifyClient:
         # resp shape per _request(): { "status": int, "body": dict, "headers": dict }
         body = resp.get("body", {}) if isinstance(resp, dict) else {}
         return body.get("variants", [])
+    
+    async def get_product_by_id(self, product_id: str) -> dict | None:
+        resp = await self.get(f"products/{product_id}.json")
+        body = resp.get("body", {}) if isinstance(resp, dict) else {}
+        return body.get("product")
+
+    async def get_variant_by_id(self, variant_id: str) -> dict | None:
+        resp = await self.get(f"variants/{variant_id}.json")
+        body = resp.get("body", {}) if isinstance(resp, dict) else {}
+        return body.get("variant")
 
     def _build_url(self, path: str, query: Optional[Dict[str, Any]] = None) -> str:
         url = f"{self.base_url}/{path.lstrip('/')}"

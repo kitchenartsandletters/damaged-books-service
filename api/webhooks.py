@@ -21,7 +21,7 @@ async def handle_inventory_level_update(
 
     try:
         raw_body = await request.body()
-        is_valid = shopify_client.verify_webhook(hmac=x_shopify_hmac_sha256, data=raw_body)
+        is_valid = await shopify_client.verify_webhook(hmac=x_shopify_hmac_sha256, data=raw_body)
 
         if not is_valid:
             logger.error("Invalid webhook signature")
