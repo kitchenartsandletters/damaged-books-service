@@ -41,20 +41,16 @@ def verify_shopify_hmac(hmac_header: str, body: bytes, secret: str) -> bool:
 
 @router.post("/webhooks/inventory-levels")
 async def handle_inventory_webhook(request: Request):
-    # Get raw request body
     raw_body = await request.body()
 
-    # Get HMAC header
     hmac_header = request.headers.get("X-Shopify-Hmac-Sha256")
     if not hmac_header:
         raise HTTPException(status_code=400, detail="Missing HMAC header")
 
-    # Get Shopify secret key from centralized config
     shopify_secret = settings.SHOPIFY_API_SECRET
     if not shopify_secret:
         raise HTTPException(status_code=500, detail="Missing server secret for webhook validation")
 
-    # Validate HMAC
     if not verify_shopify_hmac(hmac_header, raw_body, shopify_secret):
         raise HTTPException(status_code=401, detail="Invalid HMAC signature")
 
@@ -65,21 +61,35 @@ async def handle_inventory_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
     inventory_item_id = data.get("inventory_item_id")
-    variant_id = data.get("variant_id")
-    product_id = data.get("product_id")
-
-    if not all([inventory_item_id, variant_id, product_id]):
-        raise HTTPException(status_code=400, detail="Missing required fields in payload")
+    if not inventory_item_id:
+        raise HTTPException(status_code=400, detail="Missing inventory_item_id")
 
     try:
+        # 🔎 Look up variant by inventory_item_id
+        variant_resp = await shopify_client.get(
+            "variants.json", params={"inventory_item_ids": inventory_item_id}
+        )
+        variants = variant_resp.get("variants", [])
+        if not variants:
+            # No variant means nothing to process; return 200 so Shopify doesn't retry
+            return JSONResponse(status_code=200, content={"status": "no-op", "reason": "no variant for inventory_item_id"})
+
+        variant = variants[0]
+        variant_id = str(variant["id"])
+        product_id = str(variant["product_id"])
+
+        # ✅ Proceed with your business logic
         result = await used_book_manager.process_inventory_change(
             inventory_item_id=str(inventory_item_id),
-            variant_id=str(variant_id),
-            product_id=str(product_id),
+            variant_id=variant_id,
+            product_id=product_id,
         )
         return JSONResponse(status_code=200, content={"status": "success", "result": result})
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing inventory update: {str(e)}")
+        logger.error(f"Error processing inventory update: {str(e)}")
+        # Return 200 to avoid Shopify auto-retries on server-side exceptions
+        return JSONResponse(status_code=200, content={"status": "error", "detail": str(e)})
 
 @router.post("/api/products/check")
 async def check_product(req: ProductCheckRequest):
