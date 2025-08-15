@@ -9,11 +9,17 @@ logger = logging.getLogger(__name__)
 
 def is_used_book_handle(handle: str) -> bool:
     import re
-    pattern = r"-used-(like-new|very-good|good|acceptable)$"
-    return re.search(pattern, handle) is not None
+    pattern = r"-(hurt|used|damaged)-(like-new|very-good|good|acceptable)$"
+    return bool(re.search(pattern, (handle or "").lower()))
 
 def get_new_book_handle_from_used(used_handle: str) -> str:
-    return used_handle.split("-used-")[0]
+    h = (used_handle or "").lower()
+    # Split on the first marker we find (order matters less; all are unique)
+    for marker in ("-hurt-", "-used-", "-damaged-"):
+        if marker in h:
+            return h.split(marker)[0]
+    # Fallback: return as-is if no marker present
+    return h
 
 # ⬇️ make async and await the client
 async def get_product_by_id(product_id: str) -> dict:
