@@ -2,7 +2,17 @@ Damaged Books Service
 
 A FastAPI service that reacts to Shopify inventory level updates and applies business rules for damaged books: decide whether to publish/unpublish the damaged‑book product, set SEO canonicals, and create/remove redirects to the “new book” product. It’s designed to be fed by your Webhook Gateway, which forwards Shopify webhooks with the original raw body and headers intact.
 
-⸻
+---
+
+## Quick Reference: Shopify Theme Structure
+
+- **Render blocks**: Theme sections and blocks are modular Liquid files that determine the layout and content on different pages (e.g., `main-product.liquid`, `product.json`). Sections can be dynamic or static, and blocks allow for flexible arrangement of content.
+- **Snippets**: Reusable chunks of Liquid code included in multiple templates or sections (e.g., `product-card.liquid`, `price.liquid`). Snippets help avoid code duplication and keep themes maintainable.
+- **Schema**: Each section can include a `{% schema %}` tag in JSON, defining settings, blocks, and presets. This schema powers the Theme Customizer, allowing merchants to configure content and layout visually.
+- **Theme Customizer behavior**: The Shopify Theme Customizer (Theme Editor) reads section schemas to offer drag-and-drop, visibility toggles, and setting controls for merchants. Blocks defined in schema can be added, removed, or reordered.
+- **product.json usage**: In Online Store 2.0, `templates/product.json` defines the structure of the product page using references to sections and their settings. This enables flexible, per-template customization without editing Liquid directly.
+
+---
 
 What’s working today
 	•	✅ Inbound webhook: POST /webhooks/inventory-levels
