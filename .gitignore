@@ -7,6 +7,7 @@ __pycache__/
 *.env
 .env*
 !env.template  # keep a template in version control
+venv/
 
 # Node (in case frontend lives here later)
 node_modules/
