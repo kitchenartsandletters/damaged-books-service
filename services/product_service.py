@@ -9,8 +9,18 @@ logger = logging.getLogger(__name__)
 
 def is_used_book_handle(handle: str) -> bool:
     import re
-    pattern = r"-(hurt|used|damaged)-(like-new|very-good|good|acceptable)$"
+    # Accept: -hurt-, -used-, -damaged-, -damage-
+    # Accept: light | moderate | mod | heavy
+    pattern = r"-(hurt|used|damage|damaged)-(light|moderate|mod|heavy)$"
     return bool(re.search(pattern, (handle or "").lower()))
+
+def get_new_book_handle_from_used(used_handle: str) -> str:
+    h = (used_handle or "").lower()
+    # Normalize any accepted markers back to the base handle
+    for marker in ("-hurt-", "-used-", "-damaged-", "-damage-"):
+        if marker in h:
+            return h.split(marker)[0]
+    return h
 
 def get_new_book_handle_from_used(used_handle: str) -> str:
     h = (used_handle or "").lower()

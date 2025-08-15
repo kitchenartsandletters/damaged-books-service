@@ -24,6 +24,8 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             logger.warning(f"Product {product_id} not found, skipping")
             return
 
+        logger.info(f"[DamagedCheck] handle={product.get('handle')} matched={product_service.is_used_book_handle(product.get('handle',''))}")
+
         # Check if this is a used book product
         if not product_service.is_used_book_handle(product.get("handle", "")):
             logger.info(f"Product {product_id} is not a used book, skipping")

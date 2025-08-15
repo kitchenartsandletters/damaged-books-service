@@ -1,115 +1,227 @@
-Here’s your comprehensive README.md for the refactored used-books-service:
+Used Books Service
 
-# Damaged Books Service
-
-This service manages the automated publication and redirection logic for **used books** in a Shopify store. When inventory status changes, the system determines whether to publish or unpublish the product, set SEO canonicals, and create or remove redirects as appropriate.
-
----
-
-## 🧱 Project Structure
-
-used-books-service/
-├── backend/
-│   └── app/
-│       ├── main.py
-│       └── routes.py
-├── services/
-│   ├── shopify_client.py
-│   ├── product_service.py
-│   ├── redirect_service.py
-│   ├── notification_service.py
-│   ├── seo_service.py         ← (Newly scaffolded)
-│   ├── inventory_service.py   ← (Newly scaffolded)
-│   └── used_book_manager.py
-├── tasks/
-│   └── …
-├── config.py
-├── .env
-├── requirements.txt
-└── README.md
-
----
-
-## 🧠 Core Logic
-
-### `used_book_manager.py`
-
-- **process_inventory_change**
-  - Gets product info from Shopify
-  - Detects if it's a used book by handle pattern
-  - Checks stock status via `inventory_service`
-  - Updates SEO canonicals via `seo_service`
-  - Publishes/unpublishes the product
-  - Creates/removes redirect via `redirect_service`
-  - Sends notifications via `notification_service`
-
-- **scan_all_used_books**
-  - Placeholder for batch processing all used book products
-
----
-
-## 🔧 Shopify Integration
-
-### Authentication
-
-Shopify Admin API access is handled via environment variables:
-
-```env
-SHOP_URL=your-store.myshopify.com
-SHOPIFY_API_KEY=xxx
-SHOPIFY_API_SECRET=xxx
-SHOPIFY_ACCESS_TOKEN=shpat_xxx
-
-Webhook HMAC Verification
-
-Shopify webhooks are verified using the Shopify API Secret Key (SHOPIFY_API_SECRET). No separate WEBHOOK_SECRET is used by Shopify.
+A FastAPI service that reacts to Shopify inventory level updates and applies business rules for used books: decide whether to publish/unpublish the used‑book product, set SEO canonicals, and create/remove redirects to the “new book” product. It’s designed to be fed by your Webhook Gateway, which forwards Shopify webhooks with the original raw body and headers intact.
 
 ⸻
 
-⚙️ Environment Variables (.env)
+What’s working today
+	•	✅ Inbound webhook: POST /webhooks/inventory-levels
+Verifies Shopify HMAC using the App secret key (SHOPIFY_API_SECRET), parses JSON, and processes the event.
+	•	✅ Variant & product resolution:
+	1.	REST: variants.json?inventory_item_ids= with defensive post‑filtering
+	2.	GraphQL fallback: reliably maps inventory_item_id → variant_id, product_id, handle
+	•	✅ Business rule entry point: used_book_manager.process_inventory_change(...)
+Currently identifies used‑book handles and skips non‑used products (observed in logs).
+	•	✅ Gateway integration:
+Gateway forwards the raw JSON + Shopify headers and (optionally) an X-Available-Hint derived from the payload. Service accepts and logs this hint; it’s not yet used in decisions.
+	•	✅ Railway deployment:
+Correct start command and port; health endpoint responds {"status":"ok"}.
 
-SHOP_URL=your-store.myshopify.com
-SHOPIFY_API_KEY=xxx
-SHOPIFY_API_SECRET=xxx
-SHOPIFY_ACCESS_TOKEN=xxx
+⸻
+
+What’s intentionally not done yet
+	•	⏳ Applying the available_hint to decision logic (we only log it today).
+	•	⏳ Finalized inventory_service, seo_service, and redirect_service behaviors in production scenarios.
+	•	⏳ Broader webhook topics (we currently focus on inventory_levels/update).
+	•	⏳ Pagination for batch scans and richer notification channels.
+
+⸻
+
+High‑level flow
+
+Shopify ──(inventory_levels/update)──> Webhook Gateway
+   • Gateway validates Shopify HMAC
+   • Logs to Supabase
+   • Forwards raw body + Shopify headers to Used Books Service
+              │
+              ▼
+Used Books Service
+   1) Verifies Shopify HMAC again (defense‑in‑depth)
+   2) Parses payload, extracts inventory_item_id (+ logs optional available_hint)
+   3) Resolve variant/product:
+        a) REST variants.json with post‑filtering
+        b) GQL fallback if REST returns noisy page
+   4) If handle indicates a used book:
+        - Check stock (inventory_service)
+        - Publish/unpublish (product_service)
+        - Update canonical (seo_service)
+        - Create/remove redirect (redirect_service)
+   5) Return 200 always for app errors to avoid Shopify auto‑retries
 
 
 ⸻
 
-🧪 Development
+Endpoints
+	•	GET /health → {"status":"ok"}
+	•	POST /webhooks/inventory-levels
+Verified by X-Shopify-Hmac-Sha256. Expects Shopify inventory payload.
+	•	(Utility) POST /api/products/check
+Manually invoke process_inventory_change with product_id, variant_id, inventory_item_id.
+	•	(Utility) POST /api/products/scan-all
+Placeholder batch scan.
+	•	(Utility) GET /api/products, GET /api/products/{product_id}, PUT /api/products/{product_id}/publish|unpublish
+	•	(Utility) GET/POST/DELETE /api/redirects[...]
+Redirect helpers (scaffolded).
 
-Requirements
+⸻
 
+Environment
+
+Create .env (or set env vars in Railway):
+
+SHOP_URL=your-store.myshopify.com
+SHOPIFY_API_KEY=...              # required by client scaffolding
+SHOPIFY_API_SECRET=...           # App secret key – used for HMAC verification - synonymous with webhook secret
+SHOPIFY_ACCESS_TOKEN=shpat_...   # Admin API access token
+LOG_LEVEL=INFO                   # optional
+
+Important: HMAC verification for Shopify webhooks must use the webhook secret, previoulsy described as App secret key (variable still retains name SHOPIFY_API_SECRET). This service expects the Gateway to pass through Shopify’s X-Shopify-Hmac-Sha256 header and the original raw body. No separate webhook secret is used here.
+
+⸻
+
+Run locally
+
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 
-Running Locally
+# Set env (or use .env)
+export SHOP_URL=...
+export SHOPIFY_API_SECRET=...
+export SHOPIFY_ACCESS_TOKEN=...
 
-uvicorn backend.app.main:app --reload
+python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+# http://127.0.0.1:8000/health  -> {"status":"ok"}
 
-Railway Deployment Notes
-	•	Project uses uvicorn with an ASGI FastAPI app.
-	•	nixpacks will fail unless the directory includes a recognizable main.py entry point and requirements.txt.
+Local HMAC test
+
+cat >/tmp/body.json <<'EOF'
+{"inventory_item_id":123,"location_id":40052293765,"available":5}
+EOF
+
+HMAC=$(node -e "const fs=require('fs'),c=require('crypto');const b=fs.readFileSync('/tmp/body.json');console.log(c.createHmac('sha256', process.env.SHOPIFY_API_SECRET).update(b).digest('base64'))")
+
+curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
+  -H "Content-Type: application/json" \
+  -H "X-Shopify-Hmac-Sha256: $HMAC" \
+  -H "X-Shopify-Topic: inventory_levels/update" \
+  -H "X-Shopify-Shop-Domain: your-store.myshopify.com" \
+  --data-binary @/tmp/body.json
+
 
 ⸻
 
-✅ Recent Refactor Highlights
-	•	Centralized Shopify configuration using config.py and pydantic.BaseSettings
-	•	Removed redundant usage of WEBHOOK_SECRET, using SHOPIFY_API_SECRET for HMAC verification
-	•	Converted shopify_client to a class-based structure
-	•	Updated import references to use proper method access on instantiated shopify_client
-	•	Scaffolding added:
-	•	seo_service.py for canonical updates
-	•	inventory_service.py for stock checks
-	•	routes.py and shopify_client.py now import config properly via:
-
-from config import settings
-
-
+Deploy on Railway
+	•	Start command:
+uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+	•	Ensure Public Networking is enabled and the service listens on $PORT.
+	•	Set env vars (SHOP_URL, SHOPIFY_API_SECRET, SHOPIFY_ACCESS_TOKEN, etc.).
+	•	Health check: GET /health should return {"status":"ok"}.
 
 ⸻
 
-🧼 TODO
-	•	Finalize scan_all_used_books() with real Shopify product pagination
-	•	Expand notification_service to support email or Slack alerts
-	•	Add webhook route for inventory updates
-	•	Harden webhook HMAC validation and error logging
+Gateway integration (what we expect)
+
+The Webhook Gateway forwards the exact Shopify request:
+
+Headers forwarded:
+	•	X-Shopify-Hmac-Sha256 (required)
+	•	X-Shopify-Topic (optional but logged)
+	•	X-Shopify-Shop-Domain (optional but logged)
+
+Optional extras (ignored for auth, useful for provenance/observability):
+	•	X-Gateway-Signature / X-Gateway-Timestamp (gateway‑side HMAC)
+	•	X-Available-Hint (a convenience header mirroring available from payload)
+
+Body:
+	•	Exact raw bytes from Shopify (no re‑serialization). We rely on this for correct HMAC verification and to avoid “null body” issues.
+
+⸻
+
+Implementation notes
+
+HMAC verification
+	•	We compute base64(hmac_sha256(app_secret, raw_body)) and compare with X-Shopify-Hmac-Sha256.
+	•	A 401 is returned only when the signature doesn’t match. App errors return 200 to avoid Shopify retries, but we log them.
+
+Variant/product resolution
+	•	Shopify REST variants.json?inventory_item_ids= is occasionally noisy (can return a full page).
+We post‑filter by inventory_item_id and, if nothing matches, we use a GraphQL fallback to resolve the variant and product exactly.
+	•	You’ll see logs like:
+
+[ShopifyClient] variants.json returned count=250
+[ShopifyClient] variants returned=250, filtered=0
+[ShopifyClient:GQL] inventory_item_id=... → variant_id=..., product_id=..., handle=...
+
+
+
+Used‑book detection
+	•	A product is considered a used book if its handle ends with one of:
+
+-damaged-(light|moderate|heavy)
+
+
+	•	If the product isn’t a used book, we skip (observed in production logs).
+
+Business rules (scaffolded)
+	•	inventory_service.is_variant_in_stock(variant_id, inventory_item_id) — source of truth for stock checks.
+	•	product_service.set_product_publish_status(product_id, publish=True|False) — publish/unpublish used product.
+	•	seo_service.update_used_book_canonicals(product, new_book_handle) — set canonical to the “new book.”
+	•	redirect_service.create_redirect(from_handle, to_handle) / delete_redirect(redirect_id) — manage redirects.
+	•	These run only when the handle is recognized as a used book.
+
+⸻
+
+Testing guide
+	1.	Health
+		curl -s https://<railway-domain>/health
+	2.	Signed local webhook (above)
+	3.	Gateway → Service end‑to‑end
+	•	Trigger a real inventory change in Shopify (or send a signed test via Gateway).
+	•	Confirm on the service:
+		•	HMAC validated
+		•	Variant/product resolved (GQL fallback if needed)
+		•	Used‑book detection either “skip” or business rule applied
+		•	200 OK response (Shopify won’t retry)
+		•	Confirm on Gateway:
+			•	webhook_logs row written
+			•	external_deliveries row shows 200 and outcome body (e.g., "no-op" or "success")
+
+⸻
+
+Troubleshooting
+	•	502 “Application failed to respond” (Railway):
+		Start command must bind to 0.0.0.0:$PORT (not a fixed port like 8000) and Public Networking must be enabled.
+	•	401 “Invalid HMAC signature”:
+		Make sure you’re using the App secret key (SHOPIFY_API_SECRET) and that the body is the exact raw bytes Shopify sent. Don’t re‑stringify.
+	•	400 “Missing HMAC header”:
+		The Gateway must forward X-Shopify-Hmac-Sha256. If you hit the service directly with curl, you must compute and pass it.
+	•	variants_count=250 with filtered=0:
+		This indicates the REST endpoint returned a page that didn’t include your inventory_item_id. The service will use GraphQL fallback automatically. If you never see the GQL logs, deploy the latest build.
+	•	“Product is not a used book, skipping”:
+		The product handle didn’t match the used‑book pattern. That’s expected for most store inventory.
+
+⸻
+
+Roadmap
+	•	Use available_hint to short‑circuit/validate stock checks.
+	•	Harden inventory_service with Shopify Inventory APIs and/or GraphQL inventory queries.
+	•	Expand to additional topics (e.g., variant updates affecting used/new mapping).
+	•	Add structured logging and richer notifications (Slack/email).
+	•	Batch pagination for scan_all_used_books.
+	•	End‑to‑end integration tests.
+
+⸻
+
+Changelog (recent)
+	•	Added GraphQL fallback for inventory_item_id → variant/product resolution.
+	•	Gateway now forwards raw Shopify bytes + headers; service verifies HMAC reliably.
+	•	Introduced optional X-Available-Hint pass‑through; service logs it.
+	•	Fixed Railway start command to use $PORT.
+	•	Cleaned up async usage (awaited client calls) and improved diagnostics.
+
+⸻
+
+License
+
+Private/internal.
