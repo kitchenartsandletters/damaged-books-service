@@ -82,24 +82,28 @@ async def handle_inventory_webhook(request: Request):
         )
 
         if not variants_exact:
-            # 200 → no-op so Shopify doesn’t retry
-            return JSONResponse(
-                status_code=200,
-                content={"status": "no-op", "reason": f"no variant found for inventory_item_id={inventory_item_id}"}
+            # 🔁 Fallback to GraphQL if REST didn't return an exact match
+            gql = await shopify_client.get_variant_product_by_inventory_item(inventory_item_id)
+            if not gql:
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "status": "no-op",
+                        "reason": f"no variant found for inventory_item_id={inventory_item_id} (REST+GQL)"
+                    }
+                )
+
+            variant_id = str(gql["variant_id"])
+            product_id = str(gql["product_id"])
+            available_hint = data.get("available")
+
+            result = await used_book_manager.process_inventory_change(
+                inventory_item_id=str(inventory_item_id),
+                variant_id=variant_id,
+                product_id=product_id,
+                available_hint=available_hint,
             )
-
-        variant = variants_exact[0]
-        variant_id = str(variant["id"])
-        product_id = str(variant["product_id"])
-
-        # Pass through the available_hint to the manager
-        result = await used_book_manager.process_inventory_change(
-            inventory_item_id=str(inventory_item_id),
-            variant_id=variant_id,
-            product_id=product_id,
-            available_hint=available_hint,
-        )
-        return JSONResponse(status_code=200, content={"status": "success", "result": result})
+            return JSONResponse(status_code=200, content={"status": "success", "result": result})
 
     except Exception as e:
         logger.error(f"Error processing inventory update: {str(e)}")
