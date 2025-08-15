@@ -1,39 +1,55 @@
-<div class="rte">
-    {% comment %}
-      If we're on a new book page (i.e. product handle doesn't include '-damaged-'),
-      loop through potential conditions and only output links for those that exist and are available.
-    {% endcomment %}
-    {% assign conditions = "light,mod,heavy" | split: "," %}
-    {% assign damaged_links = "" %}
-    {% for condition in conditions %}
-      {% assign damaged_handle = product.handle | append: '-damaged-' | append: condition %}
-      {% assign damaged_product = all_products[damaged_handle] %}
-      {% if damaged_product and damaged_product != blank and damaged_product.available %}
-        {% assign damaged_links = damaged_links | append: '<p><a href="' | append: damaged_product.url | append: '" class="damaged-book-link">View Damaged Copy (' | append: condition | append: ')</a></p>' %}
-      {% endif %}
-    {% endfor %}
-    {% if damaged_links != blank %}
-      <div class="damaged-book-section">
-        <p>We received some copies of this book which are less than perfect. While supplies last, we are offering these copies at a reduced price.  These copies are first come, first served: we cannot reserve one for you. And we cannot predict when we might receive more once we sell out of them, mostly because we really don't want to get any more damaged copies. 😊</p>
-        <p>When you order one of these books, we'll use our judgment to choose the best remaining copy for you in the category you choose. Purchases of damaged books are final sales: they are not refundable or exchangeable.</p>
-        {{ damaged_links }}
-      </div>
-    {% endif %}
+{%- comment -%} NEW/SAFE DAMAGED DETECTION {%- endcomment -%}
+{%- assign is_damaged_page = false -%}
+{%- if product.handle contains '-damaged-' or product.handle contains '-damage-' -%}
+{%- assign is_damaged_page = true -%}
+{%- endif -%}
 
-    {%- comment %} Insert condition copy for damaged books if we're on a damaged book page {% endcomment %}
-    {% if product.handle contains '-damaged-' %}
-      {% assign parts = product.handle | split: '-damaged-' %}
-      {% assign condition = parts[1] %}
-      {% if condition == "light" %}
-        {% assign condition_copy = "<strong>Lightly damaged</strong> means that the book shows one or more minor bumps to its edges or corners which are cosmetically unsatisfying but don't affect the book's usefulness." %}
-      {% elsif condition == "mod" %}
-        {% assign condition_copy = "<strong>Moderately damaged</strong> means that the book may have noticeable cosmetic damage to its exterior or a few pages which are wrinkled or torn." %}
-      {% elsif condition == "heavy" %}
-        {% assign condition_copy = "<strong>Heavily damaged</strong> means that the book is somehow weakened, usually by damages to its spine that mean it will have to be handled carefully to preserve its usefulness." %}
-      {% endif %}
-      {% if condition_copy %}
-        <div class="condition-copy">
-          <p>{{ condition_copy }}</p>
-        </div>
-      {% endif %}
-    {% endif %}
+{%- unless is_damaged_page -%}
+{%- assign conditions = "light,moderate,heavy" | split: "," -%}
+{%- assign damaged_links = "" -%}
+
+{%- for condition in conditions -%}
+    {%- assign damaged_handle = product.handle | append: '-damaged-' | append: condition -%}
+    {%- assign damaged_product = all_products[damaged_handle] -%}
+    {%- if damaged_product and damaged_product != blank and damaged_product.available -%}
+    {%- assign link_html = '<p><a href="' | append: damaged_product.url | append: '" class="damaged-book-link">View Damaged Copy (' | append: condition | append: ')</a></p>' -%}
+    {%- assign damaged_links = damaged_links | append: link_html -%}
+    {%- endif -%}
+{%- endfor -%}
+
+{%- if damaged_links != blank -%}
+    <div class="damaged-book-section">
+    <p>We received some copies of this book which are less than perfect. While supplies last, we are offering these copies at a reduced price. These copies are first come, first served; we cannot reserve one. We also can’t predict if or when more will arrive.</p>
+    <p>When you order one of these, we’ll choose the best remaining copy in the condition you select. Damaged book purchases are final sale—no returns or exchanges.</p>
+    {{ damaged_links }}
+    </div>
+{%- endif -%}
+{%- endunless -%}
+
+{%- comment -%} DAMAGED PAGE CALLOUT {%- endcomment -%}
+{%- if product.handle contains '-damaged-' or product.handle contains '-damage-' -%}
+{%- if product.handle contains '-damaged-' -%}
+    {%- assign parts = product.handle | split: '-damaged-' -%}
+{%- else -%}
+    {%- assign parts = product.handle | split: '-damage-' -%}
+{%- endif -%}
+{%- assign base_handle = parts[0] -%}
+{%- assign condition = parts[1] -%}
+{%- assign main_product = all_products[base_handle] -%}
+
+{%- case condition -%}
+    {%- when 'light' -%}
+    {%- assign condition_copy = "<strong>Lightly damaged</strong> means minor bumps or corner wear that don’t affect readability." -%}
+    {%- when 'moderate' -%} {# NOTE: 'moderate', not 'mod' #}
+    {%- assign condition_copy = "<strong>Moderately damaged</strong> means more noticeable exterior wear or a few wrinkled/torn pages." -%}
+    {%- when 'heavy' -%}
+    {%- assign condition_copy = "<strong>Heavily damaged</strong> often includes spine issues; handle with care to preserve usability." -%}
+{%- endcase -%}
+
+<div class="damaged-condition-callout">
+    {%- if condition_copy -%}<p>{{ condition_copy }}</p>{%- endif -%}
+    {%- if main_product and main_product != blank -%}
+    <p><a href="{{ main_product.url }}">Prefer a new copy?</a></p>
+    {%- endif -%}
+</div>
+{%- endif -%}

@@ -304,7 +304,80 @@
                                                 %}
                                             </div>
 
+                                        {%- when 'damaged-book' -%}
+                                            {%- render 'damaged-book-snippet' -%}
+
+                                        {%- comment -%} --- Damaged UI (new & damaged pages) --- {%- endcomment -%}
+                                        {%- assign is_damaged_page = false -%}
+                                        {%- if product.handle contains '-damaged-' -%}
+                                        {%- assign is_damaged_page = true -%}
+                                        {%- endif -%}
+
+                                        {%- if is_damaged_page -%}
+                                        {%- assign parts = product.handle | split: '-damaged-' -%}
+                                        {%- assign base_handle = parts[0] -%}
+                                        {%- assign current_condition = parts[1] -%}
+                                        {%- else -%}
+                                        {%- assign base_handle = product.handle -%}
+                                        {%- assign current_condition = '' -%}
+                                        {%- endif -%}
+
+                                        {%- assign conditions = 'light,moderate,heavy' | split: ',' -%}
+
+                                        {%- comment -%}
+                                        Build links from the **base** handle only (prevents …-damaged-…-damaged-…).
+                                        This is at most 3 all_products lookups.
+                                        {%- endcomment -%}
+                                        {%- assign damaged_links = '' -%}
+                                        {%- for c in conditions -%}
+                                        {%- assign h = base_handle | append: '-damaged-' | append: c -%}
+                                        {%- assign p = all_products[h] -%}
+                                        {%- if p and p != blank and p.available -%}
+                                            {%- assign link_html = '<p><a href="' 
+                                                | append: p.url 
+                                                | append: '" class="damaged-book-link">View Damaged Copy (' 
+                                                | append: c 
+                                                | append: ')</a></p>' -%}
+                                            {%- assign damaged_links = damaged_links | append: link_html -%}
+                                        {%- endif -%}
+                                        {%- endfor -%}
+
+                                        {%- comment -%} Teaser: show on NEW book pages only {%- endcomment -%}
+                                        {%- unless is_damaged_page -%}
+                                        {%- if damaged_links != blank -%}
+                                            <div class="damaged-book-section">
+                                            <p>Don't need a perfect copy?</p>
+                                            {{ damaged_links }}
+                                            </div>
+                                        {%- endif -%}
+                                        {%- endunless -%}
+
+                                        {%- comment -%} Damaged page callout + back link {%- endcomment -%}
+                                        {%- if is_damaged_page -%}
+                                        {%- assign main_product = all_products[base_handle] -%}
+                                        {%- case current_condition -%}
+                                            {%- when 'light' -%}
+                                            {%- assign condition_copy = "<strong>Light damage</strong> means minor bumps or corner wear that don’t affect readability." -%}
+                                            {%- when 'moderate' -%}
+                                            {%- assign condition_copy = "<strong>Moderate damage</strong> means more noticeable exterior wear or a few wrinkled/torn pages." -%}
+                                            {%- when 'heavy' -%}
+                                            {%- assign condition_copy = "<strong>Heavy damage</strong> often includes spine issues; handle with care to preserve usability." -%}
+                                        {%- endcase -%}
+
+                                        <div class="damaged-condition-callout">
+                                                        
+                                            <p>We received some copies of this book which are less than perfect. While supplies last, we are offering these copies at a reduced price. These copies are first come, first served; we cannot reserve one. We also can’t predict if or when more will arrive.</p>
+                                            <p>When you order one of these, we’ll choose the best remaining copy in the condition you select. Damaged book purchases are final sale—no returns or exchanges.</p>
+
+                                            {%- if condition_copy -%}<p>{{ condition_copy }}</p>{%- endif -%}
+                                            {%- if main_product and main_product != blank -%}
+                                            <p><a href="{{ main_product.url }}">Prefer a new copy?</a></p>
+                                            {%- endif -%}
+                                        </div>
+                                        {%- endif -%}
+
 {%- when 'description' -%}
+
     <div class="product-single__box__block product-single__box__block--{{ block.type }}" {{ block.shopify_attributes }}>
         {% render 'pdp-block-description', description: product.description %}
     </br>
