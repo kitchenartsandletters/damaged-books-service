@@ -22,14 +22,28 @@ def get_new_book_handle_from_used(used_handle: str) -> str:
             return h.split(marker)[0]
     return h
 
-def get_new_book_handle_from_used(used_handle: str) -> str:
-    h = (used_handle or "").lower()
-    # Split on the first marker we find (order matters less; all are unique)
-    for marker in ("-hurt-", "-used-", "-damaged-"):
-        if marker in h:
-            return h.split(marker)[0]
-    # Fallback: return as-is if no marker present
-    return h
+async def _publish_to_online_store(product_id: str) -> None:
+    """
+    Ensure the product is listed in Online Store.
+    POST /product_listings.json
+    """
+    try:
+        payload = {"product_listing": {"product_id": product_id}}
+        await shopify_client.post("product_listings.json", data=payload)
+    except Exception as e:
+        logger.warning(f"Online Store publish failed for product {product_id}: {str(e)}")
+
+
+async def _unpublish_from_online_store(product_id: str) -> None:
+    """
+    Ensure the product is removed from Online Store listing.
+    DELETE /product_listings/{id}.json
+    """
+    try:
+        await shopify_client.delete(f"product_listings/{product_id}.json")
+    except Exception as e:
+        # If it wasn't listed, Shopify may 404—treat as benign
+        logger.info(f"Online Store unpublish note for product {product_id}: {str(e)}")
 
 # ⬇️ make async and await the client
 async def get_product_by_id(product_id: str) -> dict:

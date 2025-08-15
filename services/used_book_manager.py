@@ -68,19 +68,23 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             logger.info(f"Unpublished used book {product['handle']} as it's out of stock")
 
             try:
-                existing_redirect = await redirect_service.find_redirect_by_path(product["handle"])
-                if not existing_redirect:
-                    redirect = await redirect_service.create_redirect(product["handle"], new_book_handle)
-                    if redirect:
+                existing = await redirect_service.find_redirect_by_path(product["handle"])
+                if existing:
+                    logger.info(f"Redirect already exists for {product['handle']} → {new_book_handle}")
+                else:
+                    created = await redirect_service.create_redirect(product["handle"], new_book_handle)
+                    # treat only a dict with an id as success
+                    if isinstance(created, dict) and created.get("id"):
                         logger.info(f"Created redirect from {product['handle']} to {new_book_handle}")
                     else:
-                        logger.warning(f"Failed to create redirect from {product['handle']} to {new_book_handle}")
-                        notification_service.notify("warning", "Redirect Creation Failed",
-                            f"Could not create redirect from {product['handle']} to {new_book_handle}")
+                        raise RuntimeError("Redirect creation returned empty result")
             except Exception as e:
-                logger.warning(f"Redirect creation error for {product['handle']}: {str(e)}")
-                notification_service.notify("warning", "Redirect Operation Failed",
-                    f"Error with redirect for {product['handle']}: {str(e)}")
+                logger.warning(f"Redirect operation error for {product['handle']}: {str(e)}")
+                notification_service.notify(
+                    "warning",
+                    "Redirect Operation Failed",
+                    f"Error with redirect for {product['handle']}: {str(e)}"
+                )
 
         return {
             "productId": product_id,
