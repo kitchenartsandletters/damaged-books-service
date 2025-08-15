@@ -69,13 +69,16 @@ async def handle_inventory_webhook(request: Request):
         variants = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
 
         # Debug: how many did we get?
-        logger.info(f"[Inventory Lookup] variants_count={len(variants)} for inventory_item_id={inventory_item_id}")
+        logger.info(f"[Inventory Lookup] filtered_count={len(variants)} for inventory_item_id={inventory_item_id}")
 
         if not variants:
             # 200 → no-op so Shopify doesn’t retry
             return JSONResponse(
                 status_code=200,
-                content={"status": "no-op", "reason": f"no variant found for inventory_item_id={inventory_item_id}"}
+                content={
+                    "status": "no-op",
+                    "reason": f"no variant match for inventory_item_id={inventory_item_id}"
+                }
             )
 
         variant = variants[0]

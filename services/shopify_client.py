@@ -35,19 +35,32 @@ class ShopifyClient:
             "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
         }
 
-    async def get_variants_by_inventory_item_id(self, inventory_item_id: int) -> list:
+    async def get_variants_by_inventory_item_id(self, inventory_item_id: int | str) -> list[dict]:
         """
-        Convenience helper for:
-        GET /admin/api/{ver}/variants.json?inventory_item_ids=<id>
-        Returns the 'variants' array ([] if none).
+        GET /admin/api/{ver}/variants.json?inventory_item_ids=<csv>
+        Returns only variants that truly match inventory_item_id (defensive filter).
         """
         resp = await self.get(
             "variants.json",
-            query={"inventory_item_ids": inventory_item_id}
+            query={
+                "inventory_item_ids": str(inventory_item_id),  # CSV string is safest
+                "fields": "id,product_id,inventory_item_id",
+                "limit": 250,  # raise to reduce chance of paging past target
+            }
         )
         # resp shape per _request(): { "status": int, "body": dict, "headers": dict }
         body = resp.get("body", {}) if isinstance(resp, dict) else {}
         return body.get("variants", [])
+    
+        # Defensive filter in case Shopify ignores the query filter
+        inventory_item_id = str(inventory_item_id)
+        filtered = [v for v in variants if str(v.get("inventory_item_id")) == inventory_item_id]
+
+        logger.info(
+            f"[ShopifyClient] variants returned={len(variants)}, filtered={len(filtered)} "
+            f"for inventory_item_id={inventory_item_id}"
+        )
+        return filtered
     
     async def get_product_by_id(self, product_id: str) -> dict | None:
         resp = await self.get(f"products/{product_id}.json")
