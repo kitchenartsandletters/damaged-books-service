@@ -1,5 +1,3 @@
-# services/shopify_client.py
-
 import os
 import time
 import json
@@ -38,7 +36,8 @@ class ShopifyClient:
     async def get_variants_by_inventory_item_id(self, inventory_item_id: int | str) -> list[dict]:
         """
         GET /admin/api/{ver}/variants.json?inventory_item_ids=<csv>
-        Returns only variants that truly match inventory_item_id (defensive filter).
+        Logs the raw count returned by Shopify and a defensively filtered count,
+        then returns the filtered list to avoid the “oldest product” mismatch.
         """
         resp = await self.get(
             "variants.json",
@@ -50,16 +49,24 @@ class ShopifyClient:
         )
         # resp shape per _request(): { "status": int, "body": dict, "headers": dict }
         body = resp.get("body", {}) if isinstance(resp, dict) else {}
-        return body.get("variants", [])
-    
-        # Defensive filter in case Shopify ignores the query filter
-        inventory_item_id = str(inventory_item_id)
-        filtered = [v for v in variants if str(v.get("inventory_item_id")) == inventory_item_id]
+        variants = body.get("variants", [])
 
+        # Log the raw count Shopify returned
         logger.info(
-            f"[ShopifyClient] variants returned={len(variants)}, filtered={len(filtered)} "
+            f"[ShopifyClient] variants.json returned count={len(variants)} "
             f"for inventory_item_id={inventory_item_id}"
         )
+
+        # Defensive filter in case Shopify over-returns unrelated variants
+        inv_id_str = str(inventory_item_id)
+        filtered = [v for v in variants if str(v.get("inventory_item_id")) == inv_id_str]
+
+        # Log the filtered count we will actually use
+        logger.info(
+            f"[ShopifyClient] variants returned={len(variants)}, filtered={len(filtered)} "
+            f"for inventory_item_id={inv_id_str}"
+        )
+
         return filtered
     
     async def get_product_by_id(self, product_id: str) -> dict | None:

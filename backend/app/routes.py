@@ -66,22 +66,28 @@ async def handle_inventory_webhook(request: Request):
 
     try:
         # 🔎 Use the client helper that accepts 'query' under the hood
-        variants = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
+        variants_raw = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
 
-        # Debug: how many did we get?
-        logger.info(f"[Inventory Lookup] filtered_count={len(variants)} for inventory_item_id={inventory_item_id}")
+        # Defensive: API sometimes returns a whole page. Post-filter locally.
+        variants_exact = [
+            v for v in (variants_raw or [])
+            if str(v.get("inventory_item_id")) == str(inventory_item_id)
+        ]
 
-        if not variants:
+        logger.info(
+            f"[Inventory Lookup] reported_count={len(variants_raw or [])} "
+            f"exact_match_count={len(variants_exact)} "
+            f"for inventory_item_id={inventory_item_id}"
+        )
+
+        if not variants_exact:
             # 200 → no-op so Shopify doesn’t retry
             return JSONResponse(
                 status_code=200,
-                content={
-                    "status": "no-op",
-                    "reason": f"no variant match for inventory_item_id={inventory_item_id}"
-                }
+                content={"status": "no-op", "reason": f"no variant found for inventory_item_id={inventory_item_id}"}
             )
 
-        variant = variants[0]
+        variant = variants_exact[0]
         variant_id = str(variant["id"])
         product_id = str(variant["product_id"])
 
