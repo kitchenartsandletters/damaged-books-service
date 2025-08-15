@@ -64,11 +64,12 @@ async def handle_inventory_webhook(request: Request):
     if not inventory_item_id:
         raise HTTPException(status_code=400, detail="Missing inventory_item_id")
 
-    try:
-        # 🔎 Use the client helper that accepts 'query' under the hood
-        variants_raw = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
+    # Optional hint we forward to the manager (helps short‑circuit logic)
+    available_hint = data.get("available")
 
-        # Defensive: API sometimes returns a whole page. Post-filter locally.
+    try:
+        # 🔎 Query and defensively filter
+        variants_raw = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
         variants_exact = [
             v for v in (variants_raw or [])
             if str(v.get("inventory_item_id")) == str(inventory_item_id)
@@ -91,10 +92,12 @@ async def handle_inventory_webhook(request: Request):
         variant_id = str(variant["id"])
         product_id = str(variant["product_id"])
 
+        # Pass through the available_hint to the manager
         result = await used_book_manager.process_inventory_change(
             inventory_item_id=str(inventory_item_id),
             variant_id=variant_id,
             product_id=product_id,
+            available_hint=available_hint,
         )
         return JSONResponse(status_code=200, content={"status": "success", "result": result})
 

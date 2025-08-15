@@ -36,8 +36,7 @@ class ShopifyClient:
     async def get_variants_by_inventory_item_id(self, inventory_item_id: int | str) -> list[dict]:
         """
         GET /admin/api/{ver}/variants.json?inventory_item_ids=<csv>
-        Logs the raw count returned by Shopify and a defensively filtered count,
-        then returns the filtered list to avoid the “oldest product” mismatch.
+        Returns only variants that truly match inventory_item_id (defensive filter).
         """
         resp = await self.get(
             "variants.json",
@@ -47,27 +46,79 @@ class ShopifyClient:
                 "limit": 250,  # raise to reduce chance of paging past target
             }
         )
-        # resp shape per _request(): { "status": int, "body": dict, "headers": dict }
         body = resp.get("body", {}) if isinstance(resp, dict) else {}
         variants = body.get("variants", [])
 
-        # Log the raw count Shopify returned
-        logger.info(
-            f"[ShopifyClient] variants.json returned count={len(variants)} "
-            f"for inventory_item_id={inventory_item_id}"
-        )
+        logger.info(f"[ShopifyClient] variants.json returned count={len(variants)} for inventory_item_id={inventory_item_id}")
 
-        # Defensive filter in case Shopify over-returns unrelated variants
-        inv_id_str = str(inventory_item_id)
-        filtered = [v for v in variants if str(v.get("inventory_item_id")) == inv_id_str]
+        # Defensive filter
+        inventory_item_id = str(inventory_item_id)
+        filtered = [v for v in variants if str(v.get("inventory_item_id")) == inventory_item_id]
 
-        # Log the filtered count we will actually use
         logger.info(
             f"[ShopifyClient] variants returned={len(variants)}, filtered={len(filtered)} "
-            f"for inventory_item_id={inv_id_str}"
+            f"for inventory_item_id={inventory_item_id}"
         )
-
         return filtered
+    
+    async def graph(self, query: str, variables: dict) -> dict:
+        """
+        Minimal Admin GraphQL client.
+        POST /admin/api/{ver}/graphql.json
+        """
+        url = f"{self.base_url}/graphql.json"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        }
+        payload = {"query": query, "variables": variables}
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, headers=headers, json=payload, timeout=10.0)
+            logger.info(f"[Shopify GQL] POST {url} -> {resp.status_code}")
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_variant_product_by_inventory_item(self, inventory_item_id: int | str) -> dict | None:
+        """
+        GraphQL fallback:
+        inventoryItem(id: "gid://shopify/InventoryItem/<id>") { variant { id product { id handle } } }
+        Returns {"variant_id": "<num>", "product_id": "<num>", "product_handle": "<str>"} or None.
+        """
+        gid = f"gid://shopify/InventoryItem/{inventory_item_id}"
+        query = """
+        query($id: ID!) {
+          inventoryItem(id: $id) {
+            id
+            variant {
+              id
+              product { id handle }
+            }
+          }
+        }
+        """
+        data = await self.graph(query, {"id": gid})
+
+        # Basic shape & error-checking
+        inv = (data or {}).get("data", {}).get("inventoryItem")
+        if not inv or not inv.get("variant"):
+            logger.info(f"[ShopifyClient:GQL] No variant for InventoryItem {inventory_item_id}")
+            return None
+
+        var_gid = inv["variant"]["id"]                    # e.g. gid://shopify/ProductVariant/1234567890
+        prod_gid = inv["variant"]["product"]["id"]        # e.g. gid://shopify/Product/9876543210
+        handle   = inv["variant"]["product"].get("handle")
+
+        def gid_to_num(gid_str: str) -> str:
+            # last path segment is numeric id
+            return gid_str.rsplit("/", 1)[-1]
+
+        out = {
+            "variant_id": gid_to_num(var_gid),
+            "product_id": gid_to_num(prod_gid),
+            "product_handle": handle,
+        }
+        logger.info(f"[ShopifyClient:GQL] inventory_item_id={inventory_item_id} → variant_id={out['variant_id']} product_id={out['product_id']} handle={handle}")
+        return out
     
     async def get_product_by_id(self, product_id: str) -> dict | None:
         resp = await self.get(f"products/{product_id}.json")

@@ -6,8 +6,18 @@ from services import notification_service
 
 logger = logging.getLogger(__name__)
 
-async def process_inventory_change(inventory_item_id: str, variant_id: str, product_id: str) -> dict:
+async def process_inventory_change(inventory_item_id: str, variant_id: str, product_id: str, available_hint: int | None = None) -> dict:
     try:
+        # Optional hint from upstream about current available quantity
+        if available_hint is not None:
+            try:
+                logger.info(
+                    f"[Hint] available_hint={available_hint} for inventory_item_id={inventory_item_id}, "
+                    f"variant_id={variant_id}, product_id={product_id}"
+                )
+            except Exception:
+                # Logging must not interfere with processing
+                pass
         # Get product details
         product = await product_service.get_product_by_id(product_id)
         if not product:
@@ -76,6 +86,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             "inStock": is_in_stock,
             "action": "published" if is_in_stock else "unpublished",
             "canonicalSet": bool(canonical_set),
+            "availableHint": available_hint,
         }
 
     except Exception as e:
