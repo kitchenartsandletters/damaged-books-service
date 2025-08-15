@@ -1,7 +1,7 @@
 # tasks/cron_tasks.py
 
 from celery import shared_task
-from services.cron_service import get_all_hurt_books
+from services.cron_service import get_all_used_books
 from services.used_book_manager import process_inventory_change
 from services.backup_service import backup_redirects
 from services.notification_service import notify_critical_error
@@ -12,15 +12,15 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task
-def process_all_hurt_books():
+def process_all_used_books():
     """
     Scheduled inventory processing task.
     """
     try:
-        logger.info("🔁 Running scheduled hurt book inventory scan...")
-        hurt_books = asyncio.run(get_all_hurt_books())
+        logger.info("🔁 Running scheduled used book inventory scan...")
+        used_books = asyncio.run(get_all_used_books())
 
-        for product in hurt_books:
+        for product in used_books:
             for variant in product.get("variants", []):
                 asyncio.run(process_inventory_change(
                     variant["inventory_item_id"],

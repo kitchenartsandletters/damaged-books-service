@@ -5,6 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .routes import router as app_router
 from fastapi.responses import JSONResponse
 
+import logging
+logging.basicConfig(level=logging.INFO)
+
 # Import routers
 from api import system
 # Future imports: webhook, products, redirects, status, etc.

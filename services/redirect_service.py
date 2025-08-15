@@ -13,7 +13,7 @@ async def find_redirect_by_path(path: str) -> dict | None:
     Returns the first matching redirect, or None.
     """
     try:
-        response = await shopify_client.get("redirects.json", params={"path": f"/products/{path}"})
+        response = await shopify_client.get("redirects.json", query={"path": f"/products/{path}"})
         redirects = response.get("redirects", [])
         
         if not redirects:
@@ -27,24 +27,24 @@ async def find_redirect_by_path(path: str) -> dict | None:
         return None
 
 
-async def create_redirect(hurt_book_path: str, target_path: str) -> dict | None:
+async def create_redirect(used_book_path: str, target_path: str) -> dict | None:
     """
-    Create a 302 redirect from the hurt book path to the canonical target.
+    Create a 302 redirect from the used book path to the canonical target.
     """
     try:
         payload = {
             "redirect": {
-                "path": f"/products/{hurt_book_path}",
+                "path": f"/products/{used_book_path}",
                 "target": f"/products/{target_path}",
                 "redirect_type": "302"
             }
         }
         response = await shopify_client.post("redirects.json", json=payload)
-        logger.info(f"Created redirect from {hurt_book_path} to {target_path}")
+        logger.info(f"Created redirect from {used_book_path} to {target_path}")
         return response.get("redirect")
 
     except Exception as e:
-        logger.error(f"Error creating redirect from {hurt_book_path} to {target_path}: {str(e)}")
+        logger.error(f"Error creating redirect from {used_book_path} to {target_path}: {str(e)}")
         return None
 
 

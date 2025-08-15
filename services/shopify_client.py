@@ -100,13 +100,19 @@ class ShopifyClient:
 
             raise Exception("Exceeded retry attempts due to rate limiting or request failure")
 
-    async def get(self, path: str, query: Optional[dict] = None) -> dict:
+    async def get(self, path: str, **kwargs) -> dict:
+        # accept either query=... or params=...
+        query = kwargs.get("query") or kwargs.get("params")
         return await self._request("GET", path, query=query)
 
-    async def post(self, path: str, data: dict) -> dict:
+    async def post(self, path: str, **kwargs) -> dict:
+        # accept either data=... or json=...
+        data = kwargs.get("data") or kwargs.get("json")
         return await self._request("POST", path, data=data)
 
-    async def put(self, path: str, data: dict) -> dict:
+    async def put(self, path: str, **kwargs) -> dict:
+        # accept either data=... or json=...
+        data = kwargs.get("data") or kwargs.get("json")
         return await self._request("PUT", path, data=data)
 
     async def delete(self, path: str) -> dict:

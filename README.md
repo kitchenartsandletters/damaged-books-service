@@ -8,7 +8,7 @@ This service manages the automated publication and redirection logic for **used 
 
 ## 🧱 Project Structure
 
-damaged-books-service/
+used-books-service/
 ├── backend/
 │   └── app/
 │       ├── main.py

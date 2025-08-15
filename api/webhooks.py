@@ -36,7 +36,7 @@ async def handle_inventory_level_update(
             return Response(content="Missing inventory_item_id", status_code=400)
 
         logger.info(f"Finding variant for inventory item: {inventory_item_id}")
-        variant_response = await shopify_client.get("variants.json", params={"inventory_item_ids": inventory_item_id})
+        variant_response = await shopify_client.get("variants.json", query={"inventory_item_ids": inventory_item_id})
         variants = variant_response.get("variants", [])
 
         if not variants:
