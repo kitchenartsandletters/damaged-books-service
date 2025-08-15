@@ -36,7 +36,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
         logger.info(f"Used book {product['handle']} stock status: {'in stock' if is_in_stock else 'out of stock'}")
 
         # Derive canonical new book handle
-        new_book_handle = await product_service.get_new_book_handle_from_used(product["handle"])
+        new_book_handle = product_service.get_new_book_handle_from_used(product["handle"])
 
         # Always set SEO canonical to main product
         canonical_set = await seo_service.update_used_book_canonicals(product, new_book_handle)
