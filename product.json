@@ -1,0 +1,310 @@
+/*
+ * ------------------------------------------------------------
+ * IMPORTANT: The contents of this file are auto-generated.
+ *
+ * This file may be updated by the Shopify admin theme editor
+ * or related systems. Please exercise caution as any changes
+ * made to this file may be overwritten.
+ * ------------------------------------------------------------
+ */
+{
+  "sections": {
+    "main": {
+      "type": "main-product",
+      "blocks": {
+        "vendor": {
+          "type": "vendor",
+          "disabled": true,
+          "settings": {
+            "vendor_size": 2,
+            "vendor_style": "body"
+          }
+        },
+        "title": {
+          "type": "title",
+          "settings": {
+            "title_size": 3,
+            "title_size_mobile": 3
+          }
+        },
+        "80f5a9ff-152c-4ce4-b76d-7f840fcaeb1c": {
+          "type": "shopify://apps/growave-loyalty-wishlist/blocks/block.product.reviewAvgProfile/b3d2efbe-110a-4e27-84a8-1f2ed63996a4",
+          "settings": {
+            "custom_css": ""
+          }
+        },
+        "89a9ed8e-21f6-4d42-a4a2-04362d3c52ab": {
+          "type": "sku",
+          "settings": {
+            "column": "primary",
+            "label": "by"
+          }
+        },
+        "price": {
+          "type": "price",
+          "settings": {
+            "emphasize": false,
+            "price_label_discount": true,
+            "price_label_discount_type": "text",
+            "price_label_discount_color": "#c00000"
+          }
+        },
+        "db48bf56-e904-4604-9f21-89d04e9bf249": {
+          "type": "spacer",
+          "settings": {
+            "column": "primary",
+            "top": "small",
+            "bottom": "small",
+            "border": true
+          }
+        },
+        "variant_picker": {
+          "type": "variant_picker",
+          "settings": {
+            "product_variant_style": "swatches-buttons",
+            "popup_enable": true,
+            "popup_trigger": "Size\nGröße\nTaille\nTaglia\nTalla",
+            "popup_label": "Size guide",
+            "popup_content": ""
+          }
+        },
+        "quantity_selector": {
+          "type": "quantity_selector",
+          "settings": {}
+        },
+        "inventory_notice": {
+          "type": "inventory_notice",
+          "disabled": true,
+          "settings": {
+            "inventory_limit": 27,
+            "align": "left",
+            "show_qty": true
+          }
+        },
+        "buy_buttons": {
+          "type": "buy_buttons",
+          "settings": {
+            "show_gift_card_recipient": false,
+            "enable_payment_button": false
+          }
+        },
+        "share": {
+          "type": "share",
+          "disabled": true,
+          "settings": {
+            "column": "primary",
+            "align": "center"
+          }
+        },
+        "damaged_book": {
+          "type": "damaged-book",
+          "settings": {
+            "column": "primary"
+          }
+        },
+        "description": {
+          "type": "description",
+          "settings": {
+            "column": "primary"
+          }
+        },
+        "c13717d6-5def-40f5-9684-68f8f103b0d4": {
+          "type": "tab",
+          "disabled": true,
+          "settings": {
+            "column": "secondary",
+            "title": "Collapsible tab",
+            "text": "",
+            "image_width": 1000,
+            "align": "center",
+            "link": "",
+            "tab_content": "",
+            "open": false
+          }
+        },
+        "663a3435-b014-41e0-916d-1ed9505f5691": {
+          "type": "tab",
+          "disabled": true,
+          "settings": {
+            "column": "secondary",
+            "title": "Collapsible tab",
+            "text": "",
+            "image_width": 1000,
+            "align": "center",
+            "link": "",
+            "tab_content": "",
+            "open": false
+          }
+        }
+      },
+      "block_order": [
+        "vendor",
+        "title",
+        "80f5a9ff-152c-4ce4-b76d-7f840fcaeb1c",
+        "89a9ed8e-21f6-4d42-a4a2-04362d3c52ab",
+        "price",
+        "db48bf56-e904-4604-9f21-89d04e9bf249",
+        "variant_picker",
+        "quantity_selector",
+        "inventory_notice",
+        "buy_buttons",
+        "share",
+        "damaged_book",
+        "description",
+        "c13717d6-5def-40f5-9684-68f8f103b0d4",
+        "663a3435-b014-41e0-916d-1ed9505f5691"
+      ],
+      "custom_css": [
+        "@media screen and (min-width: 767px) {.product-single__media, .product-single__secondary-blocks {width: calc(50% - 15px); } .product-single__primary-blocks {position: absolute; top: 0; right: 0; width: calc(50% - 15px); height: 100%; }}",
+        ".stock_status {margin: auto; color: black; width: 75%; padding: 5px; text-align: center;}",
+        ".backorder_button {background-color: #c12020;}",
+        ".backorder_button:hover {background-color: #af1d1d;}",
+        ".product-form__swatch__sub-title {color: #000000; font-size: 18px;}"
+      ],
+      "settings": {
+        "style": "clean",
+        "style_clean_mobile": true,
+        "layout-order": "media-left",
+        "enable_sticky_content": false,
+        "container": "full",
+        "show_breadcrumbs": false,
+        "breadcrumbs_align": "left",
+        "enable_zoom": true,
+        "enable_video_looping": false,
+        "product_image_ratio": "4:3",
+        "thumbnails_position": "bottom",
+        "thumbnails_ratio": "3:4",
+        "thumbnails_show_border": true
+      }
+    },
+    "0fc42f26-5e27-433a-a465-73cbc6df9149": {
+      "type": "section-product",
+      "blocks": {
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-vendor-1": {
+          "type": "vendor",
+          "disabled": true,
+          "settings": {
+            "vendor_size": 2,
+            "vendor_style": "body"
+          }
+        },
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-title-1": {
+          "type": "title",
+          "settings": {
+            "title_size": 3,
+            "title_size_mobile": 3
+          }
+        },
+        "5baedfc6-e344-405d-ad79-2d8c6fcf05f0": {
+          "type": "sku",
+          "settings": {
+            "label": ""
+          }
+        },
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-price-1": {
+          "type": "price",
+          "settings": {
+            "price_label_discount": true,
+            "price_label_discount_type": "text",
+            "price_label_discount_color": "#c00000"
+          }
+        },
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-spacer-1": {
+          "type": "spacer",
+          "settings": {
+            "top": "small",
+            "bottom": "small",
+            "border": true
+          }
+        },
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-description-1": {
+          "type": "description",
+          "settings": {
+            "subheading": "",
+            "desc_text": "",
+            "use_custom_description": false,
+            "split_columns": false,
+            "mobile_single_column": false
+          }
+        },
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-variant_picker-1": {
+          "type": "variant_picker",
+          "settings": {
+            "product_variant_style": "swatches-buttons",
+            "popup_enable": false,
+            "popup_trigger": "Size\nGröße\nTaille\nTaglia\nTalla",
+            "popup_label": "Size guide",
+            "popup_content": ""
+          }
+        },
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-quantity_selector-1": {
+          "type": "quantity_selector",
+          "settings": {}
+        },
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-buy_buttons-1": {
+          "type": "buy_buttons",
+          "settings": {
+            "enable_payment_button": true
+          }
+        }
+      },
+      "block_order": [
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-vendor-1",
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-title-1",
+        "5baedfc6-e344-405d-ad79-2d8c6fcf05f0",
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-price-1",
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-spacer-1",
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-description-1",
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-variant_picker-1",
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-quantity_selector-1",
+        "template--14604222333061__0fc42f26-5e27-433a-a465-73cbc6df9149-buy_buttons-1"
+      ],
+      "disabled": true,
+      "settings": {
+        "featured_product": "the-bread-bakers-pocket-companion",
+        "content_align": "default",
+        "enable_video_looping": false,
+        "product_image_ratio": "1:1",
+        "thumbnails_position": "bottom",
+        "thumbnails_ratio": "1:1",
+        "thumbnails_show_border": false
+      }
+    },
+    "product-recommendations": {
+      "type": "product-recommendations",
+      "settings": {
+        "related_title": "You may also like",
+        "section_width": "large",
+        "related_mobile_layout": "carousel",
+        "related_grid_num": 5,
+        "grid_mobile": "4",
+        "related_grid_row": 1
+      }
+    },
+    "3136164edfbb1a69f3": {
+      "type": "apps",
+      "blocks": {
+        "ca89dbfc-cf37-4849-bbfd-2b059321c6b0": {
+          "type": "shopify://apps/growave-loyalty-wishlist/blocks/block.product.reviewWidget/b3d2efbe-110a-4e27-84a8-1f2ed63996a4",
+          "settings": {
+            "min_images_for_slider_visibility": 6,
+            "reviews_per_page": 5,
+            "custom_css": ""
+          }
+        }
+      },
+      "block_order": [
+        "ca89dbfc-cf37-4849-bbfd-2b059321c6b0"
+      ],
+      "settings": {
+        "include_margins": false
+      }
+    }
+  },
+  "order": [
+    "main",
+    "0fc42f26-5e27-433a-a465-73cbc6df9149",
+    "product-recommendations",
+    "3136164edfbb1a69f3"
+  ]
+}

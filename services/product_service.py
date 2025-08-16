@@ -6,21 +6,26 @@ from services.shopify_client import shopify_client
 
 logger = logging.getLogger(__name__)
 
+def parse_damaged_handle(handle: str) -> tuple[str, str]:
+    import re
+    h = (handle or "").lower()
+    # Legacy: <base>-(hurt|used|damaged|damage)-(light|moderate|mod|heavy)
+    m = re.match(r"^(?P<base>.+)-(?:hurt|used|damaged|damage)-(light|moderate|mod|heavy)$", h)
+    if m:
+        return m.group("base"), m.group(2)
+    # New: <base>-(light|moderate|mod|heavy)-damage
+    m = re.match(r"^(?P<base>.+)-(light|moderate|mod|heavy)-damage$", h)
+    if m:
+        return m.group("base"), m.group(2)
+    return handle, None
 
 def is_used_book_handle(handle: str) -> bool:
-    import re
-    # Accept: -hurt-, -used-, -damaged-, -damage-
-    # Accept: light | moderate | mod | heavy
-    pattern = r"-(hurt|used|damage|damaged)-(light|moderate|mod|heavy)$"
-    return bool(re.search(pattern, (handle or "").lower()))
+    base, condition = parse_damaged_handle(handle)
+    return condition is not None
 
 def get_new_book_handle_from_used(used_handle: str) -> str:
-    h = (used_handle or "").lower()
-    # Normalize any accepted markers back to the base handle
-    for marker in ("-hurt-", "-used-", "-damaged-", "-damage-"):
-        if marker in h:
-            return h.split(marker)[0]
-    return h
+    base, condition = parse_damaged_handle(used_handle)
+    return base
 
 async def _publish_to_online_store(product_id: str) -> None:
     """
