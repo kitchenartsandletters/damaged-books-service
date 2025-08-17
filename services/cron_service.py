@@ -2,11 +2,13 @@
 import os
 import asyncio
 import logging
-from services.supabase_client import supabase
+from services.supabase_client import get_client
 from services.shopify_client import shopify_client
 from services import damaged_inventory_repo
 
 logger = logging.getLogger(__name__)
+
+supabase = get_client()
 
 SHOPIFY_LOCATION_ID = os.getenv("SHOPIFY_LOCATION_ID")  # required for GQL inventoryLevel
 
