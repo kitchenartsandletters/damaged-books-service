@@ -4,6 +4,7 @@ from services.shopify_client import shopify_client  # Add this import or adjust 
 import logging
 import asyncio
 from services import damaged_inventory_repo, product_service, notification_service
+import os
 
 logger = logging.getLogger(__name__)
 
