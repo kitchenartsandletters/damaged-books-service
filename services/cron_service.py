@@ -1,73 +1,70 @@
 # services/cron_service.py
-
-from services.shopify_client import shopify_client
-
-import logging
+import os
 import asyncio
+import logging
+from services.supabase_client import supabase
+from services.shopify_client import shopify_client
+from services import damaged_inventory_repo
 
 logger = logging.getLogger(__name__)
 
+SHOPIFY_LOCATION_ID = os.getenv("SHOPIFY_LOCATION_ID")  # required for GQL inventoryLevel
 
-async def get_all_used_books(max_items: int = None, quick_load: bool = False):
+async def reconcile_damaged_inventory(batch_limit: int = 200):
     """
-    Fetch all used books from Shopify based on handle pattern.
+    Pull current rows from damaged.inventory, hit Shopify GQL to confirm availability
+    for each inventory_item_id at your location, and upsert back.
     """
-    try:
-        if quick_load:
-            response = await shopify_client.get("products.json", query={"limit": 50})
-            products = response.get("products", [])
-            used_books = [p for p in products if "-used-" in p.get("handle", "")]
-            logger.info(f"Quick loaded {len(used_books)} used books")
-            return used_books
+    if not SHOPIFY_LOCATION_ID:
+        logger.warning("SHOPIFY_LOCATION_ID not set; reconcile aborted.")
+        return
 
-        logger.info(f"Starting used books scan (max_items={max_items})")
+    # 1) fetch rows
+    res = supabase.table("damaged.inventory").select(
+        "inventory_item_id, product_id, variant_id, handle, condition, title, sku, barcode"
+    ).limit(batch_limit).execute()
 
-        products = []
-        next_page_token = None
-        limit = 250
-        request_count = 0
-        MAX_REQUESTS = (max_items // limit) + 1 if max_items else 100
+    rows = res.data or []
+    logger.info(f"[Reconcile] inspecting {len(rows)} rows")
 
-        while request_count < MAX_REQUESTS:
-            params = {"limit": limit}
-            if next_page_token:
-                params["page_info"] = next_page_token
+    for r in rows:
+        inv_id = int(r["inventory_item_id"])
+        try:
+            # 2) GQL inventory level by (inventory_item_id, location_id)
+            # You can implement a helper in shopify_client if you prefer.
+            gql = """
+            query($inventoryItemId: ID!, $locationId: ID!) {
+              inventoryLevel(inventoryItemId: $inventoryItemId, locationId: $locationId) {
+                available
+              }
+            }
+            """
+            variables = {
+                "inventoryItemId": f"gid://shopify/InventoryItem/{inv_id}",
+                "locationId": f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}",
+            }
+            resp = await shopify_client.graphql(gql, variables)  # assumes you have .graphql(method) already
+            available = (resp.get("body", {}) or {}).get("data", {}) \
+                .get("inventoryLevel", {}) \
+                .get("available", 0)
 
-            response = await shopify_client.get("products.json", query=params)
-            batch = response.get("products", [])
-            headers = response.get("headers", {})
+            # 3) upsert with source='reconcile'
+            await damaged_inventory_repo.upsert(
+                inventory_item_id=inv_id,
+                product_id=int(r["product_id"]),
+                variant_id=int(r["variant_id"]),
+                handle=r["handle"],
+                condition=r.get("condition"),
+                available=int(available or 0),
+                source="reconcile",
+                title=r.get("title"),
+                sku=r.get("sku"),
+                barcode=r.get("barcode"),
+            )
+        except Exception as e:
+            logger.warning(f"[Reconcile] inventory_item_id={inv_id}: {e}")
 
-            if not batch:
-                break
-
-            used_books = [p for p in batch if "-used-" in p.get("handle", "")]
-            products.extend(used_books)
-
-            if max_items and len(products) >= max_items:
-                logger.info(f"Reached max_items limit ({max_items})")
-                return products[:max_items]
-
-            # Parse pagination token
-            next_token = None
-            link_header = headers.get("Link")
-            if link_header:
-                parts = link_header.split(",")
-                for part in parts:
-                    if 'rel="next"' in part:
-                        match = part.strip().split("page_info=")
-                        if len(match) > 1:
-                            next_token = match[1].split("&")[0].replace(">", "")
-
-            if not next_token:
-                break
-
-            next_page_token = next_token
-            request_count += 1
-            await asyncio.sleep(0.1)
-
-        logger.info(f"Completed scan. Found {len(products)} used books.")
-        return products
-
-    except Exception as e:
-        logger.error(f"Error in get_all_used_books: {str(e)}")
-        raise
+async def run_forever(interval_seconds: int = 1800):
+    while True:
+        await reconcile_damaged_inventory()
+        await asyncio.sleep(interval_seconds)

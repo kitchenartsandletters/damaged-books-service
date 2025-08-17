@@ -27,6 +27,14 @@ def get_new_book_handle_from_used(used_handle: str) -> str:
     base, condition = parse_damaged_handle(used_handle)
     return base
 
+def parse_condition_from_handle(handle: str) -> str | None:
+    _, cond = parse_damaged_handle(handle)
+    return cond
+
+def is_damaged_handle(handle: str) -> bool:
+    """Alias for is_used_book_handle to support both names in code."""
+    return is_used_book_handle(handle)
+
 async def _publish_to_online_store(product_id: str) -> None:
     """
     Ensure the product is listed in Online Store.

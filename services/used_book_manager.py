@@ -76,6 +76,28 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
                 else:
                     logger.info(f"[Redirect] Created id={created.get('id')} from {handle} → {new_book_handle}")
 
+        # services/used_book_manager.py (inside success path)
+        from services import damaged_inventory_repo
+
+        # Parse condition from handle or product data
+        parsed_condition = product_service.parse_condition_from_handle(handle) if hasattr(product_service, "parse_condition_from_handle") else None
+
+        # Fetch variant details
+        variant = await product_service.get_variant_by_id(variant_id) if hasattr(product_service, "get_variant_by_id") else None
+
+        await damaged_inventory_repo.upsert(
+            inventory_item_id=int(inventory_item_id),
+            product_id=int(product_id),
+            variant_id=int(variant_id),
+            handle=product["handle"],
+            condition=parsed_condition,            # 'light' | 'moderate' | 'heavy'
+            available=int(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
+            source='webhook',
+            title=product.get("title"),
+            sku=str(variant.get("sku")) if variant else None,
+            barcode=str(variant.get("barcode")) if variant else None,
+        )
+
         return {
             "productId": product_id,
             "handle": handle,

@@ -197,6 +197,27 @@ class ShopifyClient:
         ).digest()
         computed_hmac = base64.b64encode(digest).decode()
         return hmac.compare_digest(computed_hmac, hmac_header)
+    
+    async def get_inventory_available(self, inventory_item_id: str, location_id: str | None = None) -> int:
+        """
+        Returns 'available' for given inventory_item_id at the specified location (if provided).
+        Uses REST: GET /inventory_levels.json?inventory_item_ids=&location_ids=
+        """
+        query = {"inventory_item_ids": str(inventory_item_id)}
+        if location_id:
+            query["location_ids"] = str(location_id)
+
+        resp = await self.get("inventory_levels.json", query=query)
+        body = resp.get("body", {}) if isinstance(resp, dict) else {}
+        levels = body.get("inventory_levels", []) or []
+
+        # If multiple locations are returned, prefer the exact location match (if provided)
+        if location_id:
+            for lvl in levels:
+                if str(lvl.get("location_id")) == str(location_id):
+                    return int(lvl.get("available") or 0)
+        # else: take first / sum? We’ll take first to be explicit and keep code simple.
+        return int(levels[0].get("available") or 0) if levels else 0
 
 
 shopify_client = ShopifyClient()
