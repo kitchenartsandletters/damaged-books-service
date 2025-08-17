@@ -34,7 +34,7 @@ async def upsert(
 
 def list_view(limit: int = 200, in_stock: bool | None = None):
     # Read from `damaged.inventory_view` via explicit schema
-    q = supabase.schema("damaged").table("inventory_view").select("*").limit(limit)
+    q = supabase.schema("damaged").from_("inventory_view").select("*").limit(limit)
     if in_stock is True:
         q = q.gt("available", 0)
     elif in_stock is False:
