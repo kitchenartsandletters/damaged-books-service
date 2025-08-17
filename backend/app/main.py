@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .routes import router as app_router
 from fastapi.responses import JSONResponse
-from backend.app.admin_routes import router as admin_router
+from .admin_routes import router as admin_router
 
 import logging
 logging.basicConfig(level=logging.INFO)
