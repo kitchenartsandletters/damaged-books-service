@@ -15,7 +15,7 @@ async def upsert(
     sku: str | None = None,
     barcode: str | None = None,
 ):
-    # Calls SQL function damaged.damaged_upsert_inventory (exposed as damaged_upsert_inventory)
+    # RPC lives in damaged schema but is exposed as 'damaged_upsert_inventory'
     return supabase.rpc(
         "damaged_upsert_inventory",
         {
@@ -33,8 +33,8 @@ async def upsert(
     ).execute()
 
 def list_view(limit: int = 200, in_stock: bool | None = None):
-    # Read from `damaged.inventory_view` via explicit schema
-    q = supabase.schema("damaged").from_("inventory_view").select("*").limit(limit)
+    # IMPORTANT: use schema="damaged" for reads
+    q = supabase.table("inventory_view", schema="damaged").select("*").limit(limit)
     if in_stock is True:
         q = q.gt("available", 0)
     elif in_stock is False:
