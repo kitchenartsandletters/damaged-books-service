@@ -1,5 +1,5 @@
 # services/cron_service.py
-from services.supabase_client import supabase, get_client
+from services.supabase_client import get_client
 from services.shopify_client import shopify_client  # Add this import or adjust as needed
 import logging
 import asyncio
