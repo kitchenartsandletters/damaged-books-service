@@ -1,5 +1,7 @@
 # services/damaged_inventory_repo.py
-from services.supabase_client import supabase
+from services.supabase_client import get_client 
+
+supabase = get_client()
 
 async def upsert(
     inventory_item_id: int,
