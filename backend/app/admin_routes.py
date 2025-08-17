@@ -15,21 +15,18 @@ def require_admin_token(x_admin_token: str = Header(default="")):
     return True
 
 @router.get("/damaged-inventory")
-async def list_damaged_inventory(
+def list_damaged_inventory(
     ok = Depends(require_admin_token),
     limit: int = Query(200, ge=1, le=2000),
-    in_stock: Optional[bool] = Query(None)
+    in_stock: bool | None = Query(None)
 ):
-    res = list_view(limit=limit, in_stock=in_stock)
-    return {"data": res.data, "meta": {"count": len(res.data or [])}}
+    resp = list_view(limit=limit, in_stock=in_stock)
+    return {"data": resp.data or [], "meta": {"count": len(resp.data or [])}}
 
 @router.post("/reconcile")
 async def trigger_reconcile(ok = Depends(require_admin_token)):
-    try:
-        result = await reconcile_damaged_inventory()
-        return JSONResponse(content=result or {"ok": True})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    result = await reconcile_damaged_inventory()
+    return JSONResponse(result)
 
 @router.get("/logs")
 async def logs_link(ok = Depends(require_admin_token)):

@@ -3,7 +3,7 @@ from services.supabase_client import get_client
 
 supabase = get_client()
 
-async def upsert(
+def upsert(
     inventory_item_id: int,
     product_id: int,
     variant_id: int,
@@ -15,7 +15,7 @@ async def upsert(
     sku: str | None = None,
     barcode: str | None = None,
 ):
-    # RPC lives in damaged schema but is exposed as 'damaged_upsert_inventory'
+    # RPC lives in damaged schema; search_path is set inside the function.
     return supabase.rpc(
         "damaged_upsert_inventory",
         {
@@ -33,12 +33,9 @@ async def upsert(
     ).execute()
 
 def list_view(limit: int = 200, in_stock: bool | None = None):
-    # Query the view in the 'damaged' schema
     q = supabase.schema("damaged").from_("inventory_view").select("*").limit(limit)
-
     if in_stock is True:
         q = q.gt("available", 0)
     elif in_stock is False:
         q = q.eq("available", 0)
-
     return q.execute()
