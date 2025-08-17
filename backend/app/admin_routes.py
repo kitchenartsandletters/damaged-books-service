@@ -3,7 +3,8 @@ import os
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from fastapi.responses import JSONResponse
-from ..services.damaged_inventory_repo import list_view
+from services.damaged_inventory_repo import list_view
+from services.cron_service import reconcile_damaged_inventory
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")  # simple shared-secret
