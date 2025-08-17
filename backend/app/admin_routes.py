@@ -3,8 +3,8 @@ import os
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from fastapi.responses import JSONResponse
-from services.damaged_inventory_repo import list_view
 from services.cron_service import reconcile_damaged_inventory
+from services.damaged_inventory_repo import damaged_inventory_repo  # Add this import
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")  # simple shared-secret
@@ -20,9 +20,20 @@ async def list_damaged_inventory(
     limit: int = Query(200, ge=1, le=2000),
     in_stock: Optional[bool] = Query(None)
 ):
-    res = list_view(limit=limit, in_stock=in_stock)
-    rows = res.data or []
-    return {"data": rows, "meta": {"count": len(rows)}}
+    try:
+        res = damaged_inventory_repo.list_view(limit=limit, in_stock=in_stock)
+        rows = getattr(res, "data", None) or []
+        return {"data": rows, "meta": {"count": len(rows)}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/reconcile")
+async def trigger_reconcile(ok = Depends(require_admin_token)):
+    try:
+        result = await reconcile_damaged_inventory()
+        return JSONResponse(content=result or {"ok": True})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/logs")
 async def logs_link(ok = Depends(require_admin_token)):
@@ -42,11 +53,3 @@ async def docs(ok = Depends(require_admin_token)):
             {"title": "Admin guide", "url": "https://…"},
         ]
     }
-
-@router.post("/reconcile")
-async def trigger_reconcile(ok = Depends(require_admin_token)):
-    """
-    On-demand reconcile. (You can also run this via a worker on a schedule.)
-    """
-    result = await reconcile_damaged_inventory()
-    return JSONResponse(result)

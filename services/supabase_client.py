@@ -2,10 +2,14 @@
 import os
 from supabase import create_client, Client
 
-_SUPABASE_URL = os.getenv("SUPABASE_URL")
-_SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
 def get_client() -> Client:
-    if not _SUPABASE_URL or not _SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
-    return create_client(_SUPABASE_URL, _SUPABASE_SERVICE_ROLE_KEY)
+    return supabase
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    # Raise a loud, actionable error at import time so we don't get vague 500s later
+    raise RuntimeError("Supabase not configured. Set SUPABASE_URL and SUPABASE_KEY env vars.")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)

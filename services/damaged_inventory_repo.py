@@ -1,5 +1,5 @@
 # services/damaged_inventory_repo.py
-from services.supabase_client import get_client 
+from services.supabase_client import get_client
 
 supabase = get_client()
 
@@ -15,8 +15,7 @@ async def upsert(
     sku: str | None = None,
     barcode: str | None = None,
 ):
-    # Function lives in schema "damaged" but is callable as 'damaged_upsert_inventory'
-    # (you set search_path inside the function).
+    # Calls SQL function damaged.damaged_upsert_inventory (exposed as damaged_upsert_inventory)
     return supabase.rpc(
         "damaged_upsert_inventory",
         {
@@ -34,7 +33,8 @@ async def upsert(
     ).execute()
 
 def list_view(limit: int = 200, in_stock: bool | None = None):
-    q = supabase.table("damaged.inventory_view").select("*").limit(limit)
+    # Read from `damaged.inventory_view` via explicit schema
+    q = supabase.schema("damaged").table("inventory_view").select("*").limit(limit)
     if in_stock is True:
         q = q.gt("available", 0)
     elif in_stock is False:

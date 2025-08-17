@@ -1,10 +1,9 @@
 # services/cron_service.py
-import os
-import asyncio
+from services.supabase_client import supabase, get_client
+from services.shopify_client import shopify_client  # Add this import or adjust as needed
 import logging
-from services.supabase_client import get_client
-from services.shopify_client import shopify_client
-from services import damaged_inventory_repo
+import asyncio
+from services import damaged_inventory_repo, product_service, notification_service
 
 logger = logging.getLogger(__name__)
 
@@ -13,27 +12,23 @@ supabase = get_client()
 SHOPIFY_LOCATION_ID = os.getenv("SHOPIFY_LOCATION_ID")  # required for GQL inventoryLevel
 
 async def reconcile_damaged_inventory(batch_limit: int = 200):
-    """
-    Pull current rows from damaged.inventory, hit Shopify GQL to confirm availability
-    for each inventory_item_id at your location, and upsert back.
-    """
-    if not SHOPIFY_LOCATION_ID:
-        logger.warning("SHOPIFY_LOCATION_ID not set; reconcile aborted.")
-        return
+    inspected = 0
+    updated = 0
+    skipped = 0
 
-    # 1) fetch rows
-    res = supabase.table("damaged.inventory").select(
+    if not SHOPIFY_LOCATION_ID:
+        # Don’t 500—just report why nothing ran
+        return {"inspected": 0, "updated": 0, "skipped": 0, "note": "missing SHOPIFY_LOCATION_ID"}
+
+    res = supabase.schema("damaged").table("inventory").select(
         "inventory_item_id, product_id, variant_id, handle, condition, title, sku, barcode"
     ).limit(batch_limit).execute()
 
     rows = res.data or []
-    logger.info(f"[Reconcile] inspecting {len(rows)} rows")
-
     for r in rows:
+        inspected += 1
         inv_id = int(r["inventory_item_id"])
         try:
-            # 2) GQL inventory level by (inventory_item_id, location_id)
-            # You can implement a helper in shopify_client if you prefer.
             gql = """
             query($inventoryItemId: ID!, $locationId: ID!) {
               inventoryLevel(inventoryItemId: $inventoryItemId, locationId: $locationId) {
@@ -45,12 +40,11 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
                 "inventoryItemId": f"gid://shopify/InventoryItem/{inv_id}",
                 "locationId": f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}",
             }
-            resp = await shopify_client.graphql(gql, variables)  # assumes you have .graphql(method) already
-            available = (resp.get("body", {}) or {}).get("data", {}) \
-                .get("inventoryLevel", {}) \
-                .get("available", 0)
+            resp = await shopify_client.graphql(gql, variables)
+            available = ((resp.get("body", {}) or {}).get("data", {})
+                         .get("inventoryLevel", {})
+                         .get("available", 0))
 
-            # 3) upsert with source='reconcile'
             await damaged_inventory_repo.upsert(
                 inventory_item_id=inv_id,
                 product_id=int(r["product_id"]),
@@ -63,8 +57,11 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
                 sku=r.get("sku"),
                 barcode=r.get("barcode"),
             )
+            updated += 1
         except Exception as e:
-            logger.warning(f"[Reconcile] inventory_item_id={inv_id}: {e}")
+            skipped += 1
+
+    return {"inspected": inspected, "updated": updated, "skipped": skipped}
 
 async def run_forever(interval_seconds: int = 1800):
     while True:
