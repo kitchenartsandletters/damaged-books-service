@@ -21,9 +21,10 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
         # Don’t 500—just report why nothing ran
         return {"inspected": 0, "updated": 0, "skipped": 0, "note": "missing SHOPIFY_LOCATION_ID"}
 
-    res = supabase.from_("damaged_inventory").select(
+    res = supabase.schema("damaged").from_("inventory").select(
         "inventory_item_id, product_id, variant_id, handle, condition, title, sku, barcode"
     ).limit(batch_limit).execute()
+    rows = res.data or []   
 
     rows = res.data or []
     for r in rows:
