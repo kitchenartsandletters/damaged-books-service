@@ -75,6 +75,65 @@ Placeholder batch scan.
 	•	(Utility) GET/POST/DELETE /api/redirects[...]
 Redirect helpers (scaffolded).
 
+## 🔎 Backend health checks (Damaged Books Service)
+
+Export your env once per terminal session:
+
+```sh
+export BASE="https://used-books-service-production.up.railway.app"
+export ADMIN_API_TOKEN="YOUR_LONG_RANDOM_TOKEN"
+
+#Health
+curl -i "$BASE/health"
+# expect: 200 {"status":"ok"}
+
+#Docs link hub
+curl -i "$BASE/admin/docs" -H "X-Admin-Token: $ADMIN_API_TOKEN"
+# expect: 200 and a small JSON list of links
+
+#List damaged inventory (adds count header)
+curl -i "$BASE/admin/damaged-inventory" -H "X-Admin-Token: $ADMIN_API_TOKEN"
+# expect: 200 and header X-Result-Count: <n>
+
+#Trigger reconcile (GQL-based)
+curl -i -X POST "$BASE/admin/reconcile" -H "X-Admin-Token: $ADMIN_API_TOKEN"
+# expect: 200 {"inspected":N,"updated":M,"skipped":K}
+
+## 📦 Damaged Inventory Pipeline (current)
+
+**Canonical source:** Damaged Books Service (DBS).  
+DBS mixes live webhooks with periodic GQL reconcile and persists a normalized view in Supabase.
+
+- **Webhook ingest**: Shopify → Gateway (HMAC-verified) → DBS `/webhooks/inventory-levels`
+- **Variant resolution**: REST `variants.json` (defensive) + GQL fallback to map `inventory_item_id → (variant_id, product_id, handle)`
+- **Condition parsing**: handle patterns  
+  - Legacy: `<base>-(hurt|used|damaged|damage)-(light|moderate|mod|heavy)`  
+  - New: `<base>-(light|moderate|heavy)-damage`
+- **Upsert**: `damaged.damaged_upsert_inventory(...)` writes to `damaged.inventory`; view is `damaged.inventory_view`
+- **Reconcile**: `/admin/reconcile` walks current rows and confirms `available` via Shopify **GraphQL** (`inventoryLevel(inventoryItemId, locationId)`), then upserts with `source='reconcile'`
+- **Admin endpoints**:
+  - `GET /admin/damaged-inventory` → JSON of current rows (+ header `X-Result-Count`)
+  - `POST /admin/reconcile` → `{"inspected":N,"updated":M,"skipped":K}`
+  - `GET /admin/docs` → link hub
+- **Auth**: `X-Admin-Token: $ADMIN_API_TOKEN` (shared secret env on DBS)
+- **CORS**: DBS allows Admin Dashboard origin(s) to read `/admin/*`
+
+### Supabase objects
+- `schema damaged`
+- `damaged.inventory` (PK `inventory_item_id`)
+- `damaged.inventory_view` (adds `stock_status`)
+- `damaged.changelog` (optional; future auditing)
+- `damaged.damaged_upsert_inventory(...)` (SECURITY DEFINER; `search_path` set to `public, damaged`)
+
+### Theme/UI fallout protections
+- Product template JSON can be auto-regenerated. We added:
+  - A **schema setting** toggle to enable a fallback block.
+  - A **runtime fallback** that renders `snippets/damaged-book-snippet.liquid` after description if the block is missing.
+- Shopify “damaged” handles refactored to `<base>-<condition>-damage`; snippets updated accordingly.
+
+### Quick health tests
+See **Backend health checks** section above for `curl` snippets.
+
 ⸻
 
 Environment

@@ -1,10 +1,13 @@
 # backend/app/admin_routes.py
 import os
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Header, Query
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, Response
 from fastapi.responses import JSONResponse
 from services.cron_service import reconcile_damaged_inventory
 from services.damaged_inventory_repo import list_view
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")  # simple shared-secret
@@ -16,16 +19,34 @@ def require_admin_token(x_admin_token: str = Header(default="")):
 
 @router.get("/damaged-inventory")
 def list_damaged_inventory(
+    response: Response,
     ok = Depends(require_admin_token),
     limit: int = Query(200, ge=1, le=2000),
-    in_stock: bool | None = Query(None)
+    in_stock: bool | None = Query(None),
 ):
     resp = list_view(limit=limit, in_stock=in_stock)
-    return {"data": resp.data or [], "meta": {"count": len(resp.data or [])}}
+    data = resp.data or []
+    count = len(data)
+
+    # small audit line
+    logger.info(f"[Admin] /admin/damaged-inventory -> {count} rows (limit={limit}, in_stock={in_stock})")
+
+    # header for quick CLI checks
+    response.headers["X-Result-Count"] = str(count)
+
+    return {"data": data, "meta": {"count": count}}
 
 @router.post("/reconcile")
 async def trigger_reconcile(ok = Depends(require_admin_token)):
+    """
+    On-demand reconcile. (You can also run this via a worker on a schedule.)
+    """
     result = await reconcile_damaged_inventory()
+    # Expected shape: {"inspected": N, "updated": M, "skipped": K}
+    inspected = result.get("inspected", 0)
+    updated = result.get("updated", 0)
+    skipped  = result.get("skipped", 0)
+    logger.info(f"[Admin] reconcile invoked -> inspected={inspected} updated={updated} skipped={skipped}")
     return JSONResponse(result)
 
 @router.get("/logs")
