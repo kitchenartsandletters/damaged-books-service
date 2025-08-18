@@ -1,4 +1,4 @@
-from tasks.cron_tasks import run_reconcile
+from ..tasks.cron_tasks import run_reconcile
 from pprint import pprint
 
 if __name__ == "__main__":
