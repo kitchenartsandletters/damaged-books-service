@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header, Query, Response
 from fastapi.responses import JSONResponse
 from services.cron_service import reconcile_damaged_inventory
+from services.supabase_client import get_client
 from services.damaged_inventory_repo import list_view
 import logging
 
@@ -48,6 +49,23 @@ async def trigger_reconcile(ok = Depends(require_admin_token)):
     skipped  = result.get("skipped", 0)
     logger.info(f"[Admin] reconcile invoked -> inspected={inspected} updated={updated} skipped={skipped}")
     return JSONResponse(result)
+
+@router.get("/reconcile/status")
+def get_reconcile_status(ok = Depends(require_admin_token)):
+    """
+    Returns the latest reconcile run stats (read from damaged.reconcile_log).
+    """
+    supabase = get_client()
+
+    res = supabase.schema("damaged").from_("reconcile_log") \
+        .select("inspected, updated, skipped, note, at") \
+        .order("at", desc=True).limit(1).execute()
+
+    data = res.data[0] if res.data else None
+    if not data:
+        return {"last_run": None}
+
+    return data
 
 @router.get("/logs")
 async def logs_link(ok = Depends(require_admin_token)):
