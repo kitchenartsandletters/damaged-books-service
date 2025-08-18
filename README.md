@@ -118,6 +118,7 @@ DBS mixes live webhooks with periodic GQL reconcile and persists a normalized vi
 - **Auth**: `X-Admin-Token: $ADMIN_API_TOKEN` (shared secret env on DBS)
 - **CORS**: DBS allows Admin Dashboard origin(s) to read `/admin/*`
 
+
 ### Supabase objects
 - `schema damaged`
 - `damaged.inventory` (PK `inventory_item_id`)
