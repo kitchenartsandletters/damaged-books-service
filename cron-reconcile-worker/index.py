@@ -3,11 +3,16 @@
 import os
 import sys
 from dotenv import load_dotenv
+from pprint import pprint
 
 # Ensure parent directory (DBS project root) is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from tasks.cron_tasks import run_reconcile
+
+result = run_reconcile()
+print("✅ Reconcile completed")
+pprint(result)
 
 load_dotenv()
 
