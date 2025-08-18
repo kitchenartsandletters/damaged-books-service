@@ -10,7 +10,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
-ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN")  # simple shared-secret
+ADMIN_API_TOKEN = os.getenv("VITE_DBS_ADMIN_TOKEN")  # simple shared-secret
 
 def require_admin_token(x_admin_token: str = Header(default="")):
     if not ADMIN_API_TOKEN or x_admin_token != ADMIN_API_TOKEN:
