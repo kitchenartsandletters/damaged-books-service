@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # Ensure parent directory (DBS project root) is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from backend.tasks.cron_tasks import run_reconcile
+from tasks.cron_tasks import run_reconcile
 
 load_dotenv()
 
