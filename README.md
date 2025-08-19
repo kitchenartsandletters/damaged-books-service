@@ -80,24 +80,29 @@ Redirect helpers (scaffolded).
 Export your env once per terminal session:
 
 ```sh
-export BASE="https://used-books-service-production.up.railway.app"
-export ADMIN_API_TOKEN="YOUR_LONG_RANDOM_TOKEN"
+export VITE_DBS_BASE_URL="https://used-books-service-production.up.railway.app"
+export VITE_DBS_ADMIN_TOKEN="YOUR_LONG_RANDOM_TOKEN"
 
 #Health
-curl -i "$BASE/health"
+curl -i "$VITE_DBS_BASE_URL/health"
 # expect: 200 {"status":"ok"}
 
 #Docs link hub
-curl -i "$BASE/admin/docs" -H "X-Admin-Token: $ADMIN_API_TOKEN"
+curl -i "$VITE_DBS_BASE_URL/admin/docs" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
 # expect: 200 and a small JSON list of links
 
 #List damaged inventory (adds count header)
-curl -i "$BASE/admin/damaged-inventory" -H "X-Admin-Token: $ADMIN_API_TOKEN"
+curl -i "$VITE_DBS_BASE_URL/admin/damaged-inventory" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
 # expect: 200 and header X-Result-Count: <n>
 
+
 #Trigger reconcile (GQL-based)
-curl -i -X POST "$BASE/admin/reconcile" -H "X-Admin-Token: $ADMIN_API_TOKEN"
+curl -i -X POST "$VITE_DBS_BASE_URL/admin/reconcile" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
 # expect: 200 {"inspected":N,"updated":M,"skipped":K}
+
+#Get reconcile status (latest run)
+curl -i "$VITE_DBS_BASE_URL/admin/reconcile/status" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
+# expect: 200 {"inspected":N,"updated":M,"skipped":K,"note":..., "at":"2025-08-18T21:05:18.286561+00:00"}
 
 ## 📦 Damaged Inventory Pipeline (current)
 

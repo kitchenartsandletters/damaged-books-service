@@ -16,7 +16,7 @@ def upsert(
     barcode: str | None = None,
 ):
     # RPC lives in damaged schema; search_path is set inside the function.
-    return supabase.rpc(
+    return supabase.schema("damaged").rpc(
         "damaged_upsert_inventory",
         {
             "_inventory_item_id": inventory_item_id,
