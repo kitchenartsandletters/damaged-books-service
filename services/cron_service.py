@@ -46,8 +46,20 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
             available = ((resp.get("body", {}) or {}).get("data", {})
                          .get("inventoryLevel", {})
                          .get("available", 0))
+            
+            # Enrich sku/barcode if missing
+            sku = r.get("sku")
+            barcode = r.get("barcode")
+            if (not sku or not barcode) and r.get("variant_id"):
+                try:
+                    variant = await product_service.get_variant_by_id(str(r["variant_id"]))
+                    if variant:
+                        sku = sku or (variant.get("sku") or None)
+                        barcode = barcode or (variant.get("barcode") or None)
+                except Exception as e:
+                    logger.info(f"[Reconcile] variant enrich failed variant_id={r.get('variant_id')}: {e}")
 
-            await damaged_inventory_repo.upsert(
+            damaged_inventory_repo.upsert(
                 inventory_item_id=inv_id,
                 product_id=int(r["product_id"]),
                 variant_id=int(r["variant_id"]),
@@ -63,8 +75,8 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
         except Exception as e:
             skipped += 1
 
+        # after loop: write a single reconcile_log row and return summary
         note = "missing SHOPIFY_LOCATION_ID" if not SHOPIFY_LOCATION_ID else None
-
         try:
             supabase.schema("damaged").from_("reconcile_log").insert({
                 "inspected": inspected,
@@ -74,13 +86,13 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
             }).execute()
         except Exception as e:
             logger.warning(f"Failed to persist reconcile log: {e}")
-
+    
         return {
             "inspected": inspected,
             "updated": updated,
             "skipped": skipped,
             "note": note
-        }                           
+        }                       
     
 async def run_forever(interval_seconds: int = 1800):
     while True:
