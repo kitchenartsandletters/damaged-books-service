@@ -140,6 +140,23 @@ DBS mixes live webhooks with periodic GQL reconcile and persists a normalized vi
 ### Quick health tests
 See **Backend health checks** section above for `curl` snippets.
 
+**✅ Confirmed working after integration with Webhook Gateway replay**
+- Supabase `damaged.damaged_upsert_inventory(...)` now consistently receives replayed events and persists rows.
+- Replay endpoint in Gateway delivers raw Shopify body and headers unchanged → HMAC verified downstream.
+- Reconcile endpoint (`/admin/reconcile`) correctly inspects inventory via GraphQL and upserts back into Supabase.
+- Logs show that `inventory_item_id` resolution works with both REST + GraphQL fallback.
+- Manual replay through Gateway → DBS → Supabase → reconcile verified end-to-end.
+- Reconcile status endpoint (`/admin/reconcile/status`) reliably returns latest inspected/updated counts.
+
+**⛔ Tested but failed**
+- Early reconcile runs zeroed out inventory because the loop was returning inside the `for` prematurely (patched).
+- Initial replay attempts failed when JSON.stringify() was used in Gateway forwarding (broke Shopify HMAC).
+
+**🔁 Corrected / patched**
+- Gateway now forwards the original raw Buffer; DBS HMAC verification passes.
+- Cron service patched to avoid `return` inside loop (so all rows reconcile).
+- Tested real product inventory counts: replay reports available=1, reconcile confirms and persists as 1.
+
 ⸻
 
 Environment
@@ -282,6 +299,12 @@ Troubleshooting
 	•	Duplicate deliveries with X-Gateway-Event-ID:
 		The service expects idempotency keyed by this header to prevent duplicate processing.
 
+- **Reconcile sets available=0 unexpectedly**:
+  This was traced to an early `return` inside the loop in `cron_service.py`. Fix: ensure the loop processes all rows before returning. After patch, reconcile persists correct availability.
+
+- **Replay → HMAC mismatch**:
+  Ensure the Gateway forwards the raw request body (`Buffer`) untouched; any re-serialization (e.g. `JSON.stringify()`) breaks HMAC verification. This was fixed and tested—replay now works.
+
 ⸻
 
 Roadmap
@@ -308,6 +331,10 @@ Changelog (recent)
 	•	Hardened REST + GraphQL variant resolution with defensive filtering and retry logic.
 	•	Added schema settings and fallback block logic for damaged-book notice when `product.json` regenerates.
 	•	Updated handle pattern and centralized parsing helper (`parse_damaged_handle`) to support `[Title]: [Condition Damage]` format.
+	•	Integrated Supabase `damaged_upsert_inventory` into replay flow; verified successful persistence.
+	•	Fixed `cron_service.py` loop to avoid early return that zeroed out inventory.
+	•	Confirmed replay + reconcile round-trip on real Shopify test product (`available=1`).
+	•	Validated Gateway forwarding fix (no JSON.stringify) preserves Shopify HMAC signature.
 
 ⸻
 
