@@ -83,15 +83,17 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
         # Parse condition from handle or product data
         parsed_condition = product_service.parse_condition_from_handle(handle) if hasattr(product_service, "parse_condition_from_handle") else None
 
-        # Fetch variant details (primary: by variant_id; fallback: by inventory_item_id)
+        # Fetch variant details (prefer direct id; fallback via inventory_item_id -> variant_id)
         variant = None
         try:
             if variant_id:
                 variant = await shopify_client.get_variant_by_id(str(variant_id))
-            if not variant and inventory_item_id:
-                # Fallback: resolve by inventory_item_id, then pick the matching variant
-                candidates = await shopify_client.get_variants_by_inventory_item_id(str(inventory_item_id))
-                variant = candidates[0] if candidates else None
+
+            if not variant:
+                # Resolve the variant_id from inventory_item_id via GraphQL, then fetch full variant
+                vmap = await shopify_client.get_variant_product_by_inventory_item(str(inventory_item_id))
+                if vmap and vmap.get("variant_id"):
+                    variant = await shopify_client.get_variant_by_id(str(vmap["variant_id"]))
         except Exception as e:
             logger.warning(f"[VariantLookup] Failed for variant_id={variant_id}, inventory_item_id={inventory_item_id}: {e}")
 
