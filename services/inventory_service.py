@@ -6,6 +6,25 @@ from services.shopify_client import shopify_client
 
 logger = logging.getLogger(__name__)
 
+def _extract_condition_from_variant(variant: dict) -> Optional[str]:
+    """
+    Extract the variant option named 'Condition' (preferred). Fallback to option1/2/3
+    if present and includes 'damage' in the string.
+    """
+    try:
+        # Admin GraphQL returns selectedOptions [{name, value}]
+        for opt in (variant.get("selectedOptions") or []):
+            if (opt.get("name") or "").strip().lower() == "condition":
+                return opt.get("value")
+        # Fallback for older stores using option1/2/3
+        for k in ("option1", "option2", "option3"):
+            v = variant.get(k)
+            if isinstance(v, str) and "damage" in v.lower():
+                return v
+    except Exception as e:
+        logger.warning(f"[InventoryService] Failed to extract condition: {e}")
+    return None
+
 async def is_variant_in_stock(variant_id: str, inventory_item_id: str, *, available_hint: Optional[int] = None) -> bool:
     """
     Decide stock status.
@@ -36,3 +55,64 @@ async def is_variant_in_stock(variant_id: str, inventory_item_id: str, *, availa
         logger.warning(f"[InventoryService] stock check fallback error for inventory_item_id={inventory_item_id}: {e}")
         # On error, be conservative: treat as not in stock so we don't accidentally publish
         return False
+
+
+# ---------------------------------------------------------------
+# Additional resolver for inventory_item_id to variant/product info
+async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str) -> dict:
+    """
+    Resolve Shopify variant/product info from an inventory_item_id and return:
+      {
+        "available": int,
+        "inventory_item_id": int,
+        "variant": {
+           "id": str_gid, "sku": str|None, "barcode": str|None,
+           "title": str|None,
+           "selectedOptions": [{"name","value"}, ...],
+           "condition": "Light Damage" | "Moderate Damage" | "Heavy Damage" | None
+        },
+        "product": { "id": str_gid, "handle": str, "title": str }
+      }
+    """
+    gql = """
+    query VariantByInventoryItem($inventoryItemId: ID!, $locationId: ID!) {
+      inventoryItem(id: $inventoryItemId) {
+        id
+        variant {
+          id
+          sku
+          barcode
+          title
+          selectedOptions { name value }
+          product { id handle title }
+        }
+        inventoryLevels(first: 1, query: $locationId) {
+          edges { node { available } }
+        }
+      }
+    }
+    """
+    variables = {
+        "inventoryItemId": f"gid://shopify/InventoryItem/{inventory_item_id}",
+        "locationId": location_gid,
+    }
+    resp = await shopify_client.graphql(gql, variables)
+    data = ((resp or {}).get("body") or {}).get("data") or {}
+    item = data.get("inventoryItem") or {}
+    edges = (((item.get("inventoryLevels") or {}).get("edges")) or [])
+    available = (edges[0]["node"]["available"] if edges else 0) or 0
+    variant = item.get("variant") or {}
+    product = (variant.get("product") or {})
+    condition = _extract_condition_from_variant(variant)
+    variant["condition"] = condition
+    try:
+        inventory_item_id_int = int(inventory_item_id)
+    except Exception:
+        # If caller passed a string gid number, do a best-effort cast
+        inventory_item_id_int = int(str(inventory_item_id).split("/")[-1])
+    return {
+        "available": int(available),
+        "inventory_item_id": inventory_item_id_int,
+        "variant": variant,
+        "product": product,
+    }

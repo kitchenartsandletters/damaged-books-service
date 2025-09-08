@@ -1,10 +1,12 @@
 # api/webhooks.py
 
-from fastapi import APIRouter, Request, Response, Header
+from fastapi import APIRouter, Request, Header
+from fastapi.responses import JSONResponse
 from services.shopify_client import shopify_client
 from services.used_book_manager import process_inventory_change
 import logging
 import json
+import os
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -25,7 +27,7 @@ async def handle_inventory_level_update(
 
         if not is_valid:
             logger.error("Invalid webhook signature")
-            return Response(content="Invalid webhook signature", status_code=401)
+            return JSONResponse(content={"error": "Invalid webhook signature"}, status_code=401)
 
         payload = await request.json()
         logger.info(f"Received inventory webhook: {json.dumps(payload)}")
@@ -33,25 +35,14 @@ async def handle_inventory_level_update(
         inventory_item_id = payload.get("inventory_item_id")
         if not inventory_item_id:
             logger.error("No inventory_item_id in webhook payload")
-            return Response(content="Missing inventory_item_id", status_code=400)
+            return JSONResponse(content={"error": "Missing inventory_item_id"}, status_code=400)
 
-        logger.info(f"Finding variant for inventory item: {inventory_item_id}")
-        variant_response = await shopify_client.get("variants.json", query={"inventory_item_ids": inventory_item_id})
-        variants = variant_response.get("variants", [])
+        # Let the manager resolve variant/product/condition via Admin GraphQL
+        logger.info(f"Processing inventory change for inventory_item_id={inventory_item_id}")
+        await process_inventory_change(inventory_item_id, 0, 0)
 
-        if not variants:
-            logger.error(f"No variant found for inventory item {inventory_item_id}")
-            return Response(content="No applicable variant found", status_code=200)
-
-        variant = variants[0]
-        product_id = variant["product_id"]
-        variant_id = variant["id"]
-
-        logger.info(f"Processing inventory change for product: {product_id}, variant: {variant_id}")
-        await process_inventory_change(inventory_item_id, variant_id, product_id)
-
-        return Response(content="Webhook processed successfully", status_code=200)
+        return JSONResponse(content={"status": "ok"})
 
     except Exception as e:
         logger.error(f"Error processing inventory webhook: {str(e)}")
-        return Response(content=f"Error processing webhook: {str(e)}", status_code=200)  # Avoid Shopify retries
+        return JSONResponse(content={"status": "ok", "note": f"error: {str(e)}"})  # Avoid Shopify retries
