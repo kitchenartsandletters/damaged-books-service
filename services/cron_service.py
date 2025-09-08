@@ -4,15 +4,17 @@ from services.shopify_client import shopify_client  # Add this import or adjust 
 import logging
 import asyncio
 from services import damaged_inventory_repo, product_service, notification_service
-from services.inventory_service import resolve_by_inventory_item_id
-from services.used_book_manager import apply_product_rules_with_product
 import os
 
 logger = logging.getLogger(__name__)
-
 supabase = get_client()
+SHOPIFY_LOCATION_ID = os.getenv("SHOPIFY_LOCATION_ID")
 
-SHOPIFY_LOCATION_ID = os.getenv("SHOPIFY_LOCATION_ID")  # required for GQL inventoryLevel
+def _to_gid(kind: str, v: str | int | None) -> str | None:
+    if v is None:
+        return None
+    s = str(v)
+    return s if s.startswith("gid://") else f"gid://shopify/{kind}/{s}"
 
 async def reconcile_damaged_inventory(batch_limit: int = 200):
     inspected = 0
@@ -20,45 +22,55 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
     skipped = 0
 
     if not SHOPIFY_LOCATION_ID:
-        # Don’t 500—just report why nothing ran
         return {"inspected": 0, "updated": 0, "skipped": 0, "note": "missing SHOPIFY_LOCATION_ID"}
 
+    # Normalize once
+    location_gid = _to_gid("Location", SHOPIFY_LOCATION_ID)
+
     res = supabase.schema("damaged").from_("inventory").select(
-        "inventory_item_id, product_id, variant_id, handle, condition, title, sku, barcode"
+        "inventory_item_id, product_id, variant_id, handle, condition, title, sku, barcode, available"
     ).limit(batch_limit).execute()
+    rows = res.data or []   
+
     rows = res.data or []
-    touched = set()  # set of tuples (product_id:int, handle:str)
     for r in rows:
         inspected += 1
         inv_id = int(r["inventory_item_id"])
         try:
-            resv = await resolve_by_inventory_item_id(inv_id, f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}")
-            variant = resv.get("variant") or {}
-            product = resv.get("product") or {}
-            available = int(resv.get("available") or 0)
-            condition = variant.get("condition")
-            product_id = int((product.get("id") or "gid://shopify/Product/0").split("/")[-1])
-            variant_id = int((variant.get("id") or "gid://shopify/ProductVariant/0").split("/")[-1])
-            handle = product.get("handle") or ""
-            title = product.get("title")
-            sku = variant.get("sku")
-            barcode = variant.get("barcode")
+            gql = """
+            query($inventoryItemId: ID!, $locationId: ID!) {
+              inventoryLevel(inventoryItemId: $inventoryItemId, locationId: $locationId) {
+                available
+              }
+            }
+            """
+            variables = {
+                "inventoryItemId": f"gid://shopify/InventoryItem/{inv_id}",
+                "locationId": f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}",
+            }
+            resp = await shopify_client.graphql(gql, variables)
+            available = ((resp.get("body", {}) or {}).get("data", {})
+                         .get("inventoryLevel", {})
+                         .get("available", 0))
+
             await damaged_inventory_repo.upsert(
                 inventory_item_id=inv_id,
-                product_id=product_id,
-                variant_id=variant_id,
-                handle=handle,
-                condition=condition,
-                available=available,
+                product_id=int(r["product_id"]),
+                variant_id=int(r["variant_id"]),
+                handle=r["handle"],
+                condition=r.get("condition"),
+                available=int(available or 0),
                 source="reconcile",
-                title=title,
-                sku=sku,
-                barcode=barcode,
+                title=r.get("title"),
+                sku=r.get("sku"),
+                barcode=r.get("barcode"),
             )
             if handle:
                 touched.add((product_id, handle))
             updated += 1
+
         except Exception as e:
+            logger.info(f"[Reconcile] skip inventory_item_id={inv_id}: {e}")
             skipped += 1
     # Apply product-level rules once per damaged product we touched
     for (pid, handle) in touched:
@@ -69,25 +81,24 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
             except Exception as e:
                 logger.warning(f"Failed to apply product rules for {handle}: {e}")
 
-    note = "missing SHOPIFY_LOCATION_ID" if not SHOPIFY_LOCATION_ID else None
+        note = "missing SHOPIFY_LOCATION_ID" if not SHOPIFY_LOCATION_ID else None
 
-    # Persist reconcile log after processing all rows
-    try:
-        supabase.schema("damaged").from_("reconcile_log").insert({
+        try:
+            supabase.schema("damaged").from_("reconcile_log").insert({
+                "inspected": inspected,
+                "updated": updated,
+                "skipped": skipped,
+                "note": note,
+            }).execute()
+        except Exception as e:
+            logger.warning(f"Failed to persist reconcile log: {e}")
+
+        return {
             "inspected": inspected,
             "updated": updated,
             "skipped": skipped,
-            "note": note,
-        }).execute()
-    except Exception as e:
-        logger.warning(f"Failed to persist reconcile log: {e}")
-
-    return {
-        "inspected": inspected,
-        "updated": updated,
-        "skipped": skipped,
-        "note": note,
-    }
+            "note": note
+        }                           
     
 async def run_forever(interval_seconds: int = 1800):
     while True:

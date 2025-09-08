@@ -2,6 +2,7 @@
 
 import logging
 from services import product_service, redirect_service, seo_service, inventory_service
+from services.shopify_client import shopify_client
 from services import notification_service
 
 logger = logging.getLogger(__name__)
@@ -82,10 +83,21 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
         # Parse condition from handle or product data
         parsed_condition = product_service.parse_condition_from_handle(handle) if hasattr(product_service, "parse_condition_from_handle") else None
 
-        # Fetch variant details
-        variant = await product_service.get_variant_by_id(variant_id) if hasattr(product_service, "get_variant_by_id") else None
+        # Fetch variant details (prefer direct id; fallback via inventory_item_id -> variant_id)
+        variant = None
+        try:
+            if variant_id:
+                variant = await shopify_client.get_variant_by_id(str(variant_id))
 
-        await damaged_inventory_repo.upsert(
+            if not variant:
+                # Resolve the variant_id from inventory_item_id via GraphQL, then fetch full variant
+                vmap = await shopify_client.get_variant_product_by_inventory_item(str(inventory_item_id))
+                if vmap and vmap.get("variant_id"):
+                    variant = await shopify_client.get_variant_by_id(str(vmap["variant_id"]))
+        except Exception as e:
+            logger.warning(f"[VariantLookup] Failed for variant_id={variant_id}, inventory_item_id={inventory_item_id}: {e}")
+
+        damaged_inventory_repo.upsert(
             inventory_item_id=int(inventory_item_id),
             product_id=int(product_id),
             variant_id=int(variant_id),
@@ -94,8 +106,8 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             available=int(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
             source='webhook',
             title=product.get("title"),
-            sku=str(variant.get("sku")) if variant else None,
-            barcode=str(variant.get("barcode")) if variant else None,
+            sku=(str(variant.get("sku")) if isinstance(variant, dict) and variant.get("sku") is not None else None),
+            barcode=(str(variant.get("barcode")) if isinstance(variant, dict) and variant.get("barcode") is not None else None),
         )
 
         return {
