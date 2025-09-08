@@ -2,10 +2,62 @@
 
 import logging
 from services import product_service, redirect_service, seo_service, inventory_service
-from services.shopify_client import shopify_client
 from services import notification_service
+import os
+from typing import Optional
+from services.inventory_service import resolve_by_inventory_item_id
 
 logger = logging.getLogger(__name__)
+
+SHOPIFY_LOCATION_ID = os.getenv("SHOPIFY_LOCATION_ID")
+
+async def apply_product_rules_with_product(product_id: str, damaged_handle: str, canonical_handle: str) -> None:
+    """
+    Publish/unpublish and manage redirects at the product level:
+      - If ANY variant in-stock → publish damaged product, remove redirect.
+      - If ALL variants OOS → unpublish damaged product, create redirect to canonical.
+    Uses our damaged inventory view to compute aggregate availability.
+    """
+    try:
+        from services import damaged_inventory_repo  # local import to avoid cycles
+        rows_resp = damaged_inventory_repo.list_view(limit=2000, in_stock=None)
+        rows = rows_resp.data or []
+        product_rows = [r for r in rows if (r.get("handle") or "").lower() == damaged_handle.lower()]
+        any_in_stock = any(int(r.get("available") or 0) > 0 for r in product_rows)
+
+        if any_in_stock:
+            # Publish damaged product and remove redirect if present
+            await product_service.set_product_publish_status(product_id, True)
+            existing = await redirect_service.find_redirect_by_path(damaged_handle)
+            if existing:
+                deleted = await redirect_service.delete_redirect(str(existing.get("id")))
+                if deleted is not True and deleted not in (200, 204):
+                    logger.warning(f"[Redirect] Failed to delete redirect id={existing.get('id')} for {damaged_handle}")
+                    notification_service.notify(
+                        "warning",
+                        "Redirect Removal Failed",
+                        f"Could not remove redirect for {damaged_handle} (id={existing.get('id')})"
+                    )
+        else:
+            # Unpublish damaged product and ensure redirect exists
+            await product_service.set_product_publish_status(product_id, False)
+            existing = await redirect_service.find_redirect_by_path(damaged_handle)
+            if not existing:
+                created = await redirect_service.create_redirect(damaged_handle, canonical_handle)
+                if created is None:
+                    logger.warning(f"[Redirect] Creation returned empty/invalid result for {damaged_handle} → {canonical_handle}")
+                    notification_service.notify(
+                        "warning",
+                        "Redirect Creation Failed",
+                        f"Could not create redirect from {damaged_handle} to {canonical_handle}"
+                    )
+                else:
+                    logger.info(f"[Redirect] Created id={created.get('id')} from {damaged_handle} → {canonical_handle}")
+
+        # Always keep canonical tag pointing to the non-damaged page
+        await seo_service.update_used_book_canonicals({"handle": damaged_handle}, canonical_handle)
+    except Exception as e:
+        logger.warning(f"[UsedBookManager] apply_product_rules_with_product error: {e}")
 
 async def process_inventory_change(inventory_item_id: str, variant_id: str, product_id: str, available_hint: int | None = None) -> dict:
     try:
@@ -77,38 +129,36 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
                 else:
                     logger.info(f"[Redirect] Created id={created.get('id')} from {handle} → {new_book_handle}")
 
-        # services/used_book_manager.py (inside success path)
+        # Resolve variant + product + condition via Admin GraphQL using inventory_item_id
+        condition = None
+        variant_data = None
+        if SHOPIFY_LOCATION_ID:
+            try:
+                res = await resolve_by_inventory_item_id(int(inventory_item_id), f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}")
+                variant_data = res.get("variant") or {}
+                condition = variant_data.get("condition")
+            except Exception as e:
+                logger.warning(f"[Inventory] Resolver failed to fetch variant condition: {e}")
+        else:
+            logger.warning("[Inventory] SHOPIFY_LOCATION_ID is not set; skipping condition resolution via resolver")
+
         from services import damaged_inventory_repo
-
-        # Parse condition from handle or product data
-        parsed_condition = product_service.parse_condition_from_handle(handle) if hasattr(product_service, "parse_condition_from_handle") else None
-
-        # Fetch variant details (prefer direct id; fallback via inventory_item_id -> variant_id)
-        variant = None
-        try:
-            if variant_id:
-                variant = await shopify_client.get_variant_by_id(str(variant_id))
-
-            if not variant:
-                # Resolve the variant_id from inventory_item_id via GraphQL, then fetch full variant
-                vmap = await shopify_client.get_variant_product_by_inventory_item(str(inventory_item_id))
-                if vmap and vmap.get("variant_id"):
-                    variant = await shopify_client.get_variant_by_id(str(vmap["variant_id"]))
-        except Exception as e:
-            logger.warning(f"[VariantLookup] Failed for variant_id={variant_id}, inventory_item_id={inventory_item_id}: {e}")
-
-        damaged_inventory_repo.upsert(
+        await damaged_inventory_repo.upsert(
             inventory_item_id=int(inventory_item_id),
             product_id=int(product_id),
             variant_id=int(variant_id),
             handle=product["handle"],
-            condition=parsed_condition,            # 'light' | 'moderate' | 'heavy'
+            condition=condition,  # from variant option "Condition"
             available=int(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
             source='webhook',
             title=product.get("title"),
-            sku=(str(variant.get("sku")) if isinstance(variant, dict) and variant.get("sku") is not None else None),
-            barcode=(str(variant.get("barcode")) if isinstance(variant, dict) and variant.get("barcode") is not None else None),
+            sku=(str(variant_data.get("sku")) if variant_data else None),
+            barcode=(str(variant_data.get("barcode")) if variant_data else None),
         )
+
+        # Apply product-level rules once per product
+        new_book_handle = product_service.get_new_book_handle_from_used(handle)
+        await apply_product_rules_with_product(product_id, handle, new_book_handle)
 
         return {
             "productId": product_id,
