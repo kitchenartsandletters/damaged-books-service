@@ -56,7 +56,7 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
                          .get("inventoryLevel", {})
                          .get("available", 0))
 
-            await damaged_inventory_repo.upsert(
+            damaged_inventory_repo.upsert(
                 inventory_item_id=inv_id,
                 product_id=product_id,
                 variant_id=int(r["variant_id"]),
