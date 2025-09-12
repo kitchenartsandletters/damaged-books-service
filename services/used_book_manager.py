@@ -69,8 +69,8 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
 
         handle = (product.get("handle") or "").lower()
 
-        # Damage check (supports -hurt-, -used-, -damaged-)
-        is_damaged = product_service.is_used_book_handle(handle)
+        # Damage check: only handles ending with "-damaged" are considered damaged books.
+        is_damaged = handle.endswith("-damaged")
         logger.info(f"[DamagedCheck] handle={handle} matched={is_damaged}")
         if not is_damaged:
             logger.info(f"[Inventory] Product {product_id} is not a damaged book, skipping")
