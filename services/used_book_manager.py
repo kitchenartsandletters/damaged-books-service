@@ -130,13 +130,25 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
                     logger.info(f"[Redirect] Created id={created.get('id')} from {handle} → {new_book_handle}")
 
         # Resolve variant + product + condition via Admin GraphQL using inventory_item_id
-        condition = None
+        condition_raw = None
+        condition_key = None
         variant_data = None
         if SHOPIFY_LOCATION_ID:
             try:
                 res = await resolve_by_inventory_item_id(int(inventory_item_id), f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}")
                 variant_data = res.get("variant") or {}
-                condition = variant_data.get("condition")
+                condition_raw = variant_data.get("options", [None])[0]
+                if condition_raw is not None:
+                    condition_raw_str = str(condition_raw)
+                    condition_map = {
+                        "light damage": "light",
+                        "moderate damage": "moderate",
+                        "heavy damage": "heavy",
+                    }
+                    condition_key = condition_map.get(condition_raw_str.lower().strip(), condition_raw_str.lower().strip())
+                else:
+                    condition_raw_str = None
+                    condition_key = None
             except Exception as e:
                 logger.warning(f"[Inventory] Resolver failed to fetch variant condition: {e}")
         else:
@@ -148,7 +160,8 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             product_id=int(product_id),
             variant_id=int(variant_id),
             handle=product["handle"],
-            condition=condition,  # from variant option "Condition"
+            condition_raw=condition_raw,
+            condition_key=condition_key,
             available=int(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
             source='webhook',
             title=product.get("title"),
