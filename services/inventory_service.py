@@ -118,6 +118,7 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
     edges = (((item.get("inventoryLevels") or {}).get("edges")) or [])
     available = (edges[0]["node"]["available"] if edges else 0) or 0
     variant = item.get("variant") or {}
+    logger.info(f"[InventoryService] Raw variant payload: {variant}")
     product = (variant.get("product") or {})
     condition = _extract_condition_from_variant(variant)
     variant["condition"] = condition
