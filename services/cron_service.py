@@ -32,10 +32,12 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
     ).limit(batch_limit).execute()
     rows = res.data or []   
 
-    rows = res.data or []
+    touched = set()
     for r in rows:
         inspected += 1
         inv_id = int(r["inventory_item_id"])
+        product_id = int(r["product_id"])
+        handle = r["handle"]
         try:
             gql = """
             query($inventoryItemId: ID!, $locationId: ID!) {
@@ -55,9 +57,9 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
 
             await damaged_inventory_repo.upsert(
                 inventory_item_id=inv_id,
-                product_id=int(r["product_id"]),
+                product_id=product_id,
                 variant_id=int(r["variant_id"]),
-                handle=r["handle"],
+                handle=handle,
                 condition=r.get("condition"),
                 available=int(available or 0),
                 source="reconcile",
@@ -65,8 +67,7 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
                 sku=r.get("sku"),
                 barcode=r.get("barcode"),
             )
-            if handle:
-                touched.add((product_id, handle))
+            touched.add((product_id, handle))
             updated += 1
 
         except Exception as e:
@@ -81,25 +82,25 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
             except Exception as e:
                 logger.warning(f"Failed to apply product rules for {handle}: {e}")
 
-        note = "missing SHOPIFY_LOCATION_ID" if not SHOPIFY_LOCATION_ID else None
+    note = "missing SHOPIFY_LOCATION_ID" if not SHOPIFY_LOCATION_ID else None
 
-        try:
-            supabase.schema("damaged").from_("reconcile_log").insert({
-                "inspected": inspected,
-                "updated": updated,
-                "skipped": skipped,
-                "note": note,
-            }).execute()
-        except Exception as e:
-            logger.warning(f"Failed to persist reconcile log: {e}")
-
-        return {
+    try:
+        supabase.schema("damaged").from_("reconcile_log").insert({
             "inspected": inspected,
             "updated": updated,
             "skipped": skipped,
-            "note": note
-        }                           
-    
+            "note": note,
+        }).execute()
+    except Exception as e:
+        logger.warning(f"Failed to persist reconcile log: {e}")
+
+    return {
+        "inspected": inspected,
+        "updated": updated,
+        "skipped": skipped,
+        "note": note
+    }                           
+
 async def run_forever(interval_seconds: int = 1800):
     while True:
         await reconcile_damaged_inventory()
