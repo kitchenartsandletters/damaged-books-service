@@ -154,15 +154,19 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
         else:
             logger.warning("[Inventory] SHOPIFY_LOCATION_ID is not set; skipping condition resolution via resolver")
 
+        logger.info(
+            f"[Upsert Debug] condition_raw={condition_raw}, condition_key={condition_key}, condition={condition_key}"
+        )
+
         from services import damaged_inventory_repo
         damaged_inventory_repo.upsert(
             inventory_item_id=int(inventory_item_id),
             product_id=int(product_id),
             variant_id=int(variant_id),
             handle=handle,
-            condition=condition_key,         # ← legacy
-            condition_raw=condition_raw,     # ← new
-            condition_key=condition_key,     # ← new
+            condition=condition_key,          # backward compatibility
+            condition_raw=condition_raw,      # raw Shopify option
+            condition_key=condition_key,      # normalized key
             available=int(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
             source="webhook",
             title=product.get("title"),
