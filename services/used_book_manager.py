@@ -143,7 +143,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             logger.warning("[Inventory] SHOPIFY_LOCATION_ID is not set; skipping condition resolution via resolver")
 
         from services import damaged_inventory_repo
-        await damaged_inventory_repo.upsert(
+        damaged_inventory_repo.upsert(
             inventory_item_id=int(inventory_item_id),
             product_id=int(product_id),
             variant_id=int(variant_id),
