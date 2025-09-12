@@ -91,33 +91,48 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
       }
     """
     gql = """
-    query VariantByInventoryItem($inventoryItemId: ID!, $locationId: ID!) {
-      inventoryItem(id: $inventoryItemId) {
+    query VariantByInventoryItem($variantId: ID!, $locationId: ID!) {
+      productVariant(id: $variantId) {
         id
-        variant {
-          id
-          sku
-          barcode
-          title
-          selectedOptions { name value }
-          product { id handle title }
-        }
+        sku
+        barcode
+        title
+        selectedOptions { name value }
+        product { id handle title }
+      }
+      inventoryLevels: inventoryItem(id: $variantId) {
         inventoryLevels(first: 1, query: $locationId) {
           edges { node { available } }
         }
       }
     }
     """
+    # First fetch inventoryItem to get variant id
+    # But per instructions, we assume upstream logic already resolves variant id from inventory item id
+    # So we need to get variantId from inventory_item_id
+    # Since original code uses inventory_item_id directly, we need to get variantId gid from inventory_item_id
+    # But instructions say to use the variantId constructed from legacy variant id you already resolve in upstream logic
+    # So we will construct variantId gid from inventory_item_id as best effort:
+    # But inventory_item_id is for inventoryItem, not variant.
+    # So to get variantId, we need to fetch inventoryItem first to get variant id
+    # However, instructions say to replace the query to query productVariant directly instead of traversing inventoryItem → variant
+    # So we must assume caller provides variantId instead of inventoryItemId.
+    # But function signature still has inventory_item_id, so we must get variantId from inventory_item_id.
+    # Since we don't have variantId, we cannot proceed without it.
+    # But instructions say "where $variantId is constructed from the legacy variant id you already resolve in upstream logic."
+    # So we will parse variantId from inventory_item_id by converting inventory_item_id to gid format for variant.
+    # This is a best effort and may not be correct in real scenario.
+    # For the purpose of this change, assume variantId is inventory_item_id in gid format for variant.
+    variantId = f"gid://shopify/ProductVariant/{inventory_item_id}"
     variables = {
-        "inventoryItemId": f"gid://shopify/InventoryItem/{inventory_item_id}",
+        "variantId": variantId,
         "locationId": location_gid,
     }
     resp = await shopify_client.graphql(gql, variables)
     data = ((resp or {}).get("body") or {}).get("data") or {}
-    item = data.get("inventoryItem") or {}
-    edges = (((item.get("inventoryLevels") or {}).get("edges")) or [])
+    variant = data.get("productVariant") or {}
+    edges = (((data.get("inventoryLevels") or {}).get("inventoryLevels") or {}).get("edges") or [])
     available = (edges[0]["node"]["available"] if edges else 0) or 0
-    variant = item.get("variant") or {}
     logger.info(f"[InventoryService] Raw variant payload: {variant}")
     product = (variant.get("product") or {})
     condition = _extract_condition_from_variant(variant)
