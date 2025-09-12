@@ -163,7 +163,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             condition_raw=condition_raw,
             condition_key=condition_key,
             available=int(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
-            source='webhook',
+            source="webhook",
             title=product.get("title"),
             sku=(str(variant_data.get("sku")) if variant_data else None),
             barcode=(str(variant_data.get("barcode")) if variant_data else None),
