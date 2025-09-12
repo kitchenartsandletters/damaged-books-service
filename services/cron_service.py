@@ -5,6 +5,7 @@ import logging
 import asyncio
 from services import damaged_inventory_repo, product_service, notification_service
 import os
+from services.used_book_manager import apply_product_rules_with_product
 
 logger = logging.getLogger(__name__)
 supabase = get_client()
