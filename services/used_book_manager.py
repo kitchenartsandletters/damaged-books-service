@@ -137,15 +137,25 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             try:
                 res = await resolve_by_inventory_item_id(int(inventory_item_id), f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}")
                 variant_data = res.get("variant") or {}
-                condition_raw = variant_data.get("options", [None])[0]
-                if condition_raw is not None:
+
+                # Shopify Admin GraphQL provides selectedOptions: list of { name, value }
+                selected_options = variant_data.get("selectedOptions") or []
+                condition_raw = None
+                if selected_options:
+                    condition_raw = selected_options[0].get("value")
+
+                condition_key = None
+                if condition_raw:
                     condition_raw_str = str(condition_raw)
                     condition_map = {
                         "light damage": "light",
                         "moderate damage": "moderate",
                         "heavy damage": "heavy",
                     }
-                    condition_key = condition_map.get(condition_raw_str.lower().strip(), condition_raw_str.lower().strip())
+                    condition_key = condition_map.get(
+                        condition_raw_str.lower().strip(),
+                        condition_raw_str.lower().strip()
+                    )
                 else:
                     condition_raw_str = None
                     condition_key = None
