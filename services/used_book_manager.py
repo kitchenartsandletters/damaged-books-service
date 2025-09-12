@@ -138,8 +138,10 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
                 res = await resolve_by_inventory_item_id(int(inventory_item_id), f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}")
                 variant_data = res.get("variant") or {}
 
-                # Shopify Admin GraphQL provides selectedOptions: list of { name, value }
-                selected_options = variant_data.get("selectedOptions") or []
+                logger.debug(f"[Inventory] variant_data: {variant_data}")
+
+                # Shopify Admin GraphQL provides selected_options: list of { name, value }
+                selected_options = variant_data.get("selected_options") or []
                 condition_raw = None
                 if selected_options:
                     condition_raw = selected_options[0].get("value")
