@@ -78,6 +78,9 @@ class ShopifyClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def graphql(self, query: str, variables: dict) -> dict:
+        return await self.graph(query, variables)
+
     async def get_variant_product_by_inventory_item(self, inventory_item_id: int | str) -> dict | None:
         """
         GraphQL fallback:
