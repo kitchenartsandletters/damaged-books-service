@@ -17,7 +17,6 @@ def upsert(
     sku: str | None = None,
     barcode: str | None = None,
 ):
-    # RPC lives in damaged schema; search_path is set inside the function.
     return supabase.schema("damaged").rpc(
         "damaged_upsert_inventory",
         {
@@ -25,8 +24,9 @@ def upsert(
             "_product_id": product_id,
             "_variant_id": variant_id,
             "_handle": handle or "",
-            "_condition_raw": condition_raw,
-            "_condition_key": condition_key,
+            "_condition": condition,            # ← legacy column
+            "_condition_raw": condition_raw,    # ← new
+            "_condition_key": condition_key,    # ← new
             "_available": available,
             "_source": source,
             "_title": title,

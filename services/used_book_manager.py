@@ -159,9 +159,10 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             inventory_item_id=int(inventory_item_id),
             product_id=int(product_id),
             variant_id=int(variant_id),
-            handle=product["handle"],
-            condition_raw=condition_raw,
-            condition_key=condition_key,
+            handle=handle,
+            condition=condition_key,         # ← legacy
+            condition_raw=condition_raw,     # ← new
+            condition_key=condition_key,     # ← new
             available=int(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
             source="webhook",
             title=product.get("title"),
