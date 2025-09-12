@@ -8,21 +8,37 @@ logger = logging.getLogger(__name__)
 
 def _extract_condition_from_variant(variant: dict) -> Optional[str]:
     """
-    Extract the variant option named 'Condition' (preferred). Fallback to option1/2/3
-    if present and includes 'damage' in the string.
+    Extract the variant option related to condition/damage.
+    Priority:
+      1. Look for selectedOptions with name 'Condition' or containing 'damage'.
+      2. Fallback to option1/2/3 if they contain 'damage'.
+      3. Fallback to variant title if it looks like a condition string.
     """
     try:
         # Admin GraphQL returns selectedOptions [{name, value}]
         for opt in (variant.get("selectedOptions") or []):
-            if (opt.get("name") or "").strip().lower() == "condition":
-                return opt.get("value")
+            name = (opt.get("name") or "").strip().lower()
+            val = (opt.get("value") or "").strip()
+            if name == "condition" or "damage" in name:
+                return val
+            # In some stores, option might be named differently but value has damage keyword
+            if "damage" in val.lower():
+                return val
+
         # Fallback for older stores using option1/2/3
         for k in ("option1", "option2", "option3"):
             v = variant.get(k)
             if isinstance(v, str) and "damage" in v.lower():
                 return v
+
+        # Fallback to variant title if it contains damage info
+        title = variant.get("title")
+        if isinstance(title, str) and "damage" in title.lower():
+            return title
+
     except Exception as e:
-        logger.warning(f"[InventoryService] Failed to extract condition: {e}")
+        logger.warning(f"[InventoryService] Failed to extract condition: {e}. Variant={variant}")
+
     return None
 
 async def is_variant_in_stock(variant_id: str, inventory_item_id: str, *, available_hint: Optional[int] = None) -> bool:
