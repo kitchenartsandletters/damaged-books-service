@@ -42,7 +42,9 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
         handle = r["handle"]
         try:
             resp = await resolve_by_inventory_item_id(inv_id, location_gid)
-            available = resp.get("available", 0)
+            available = resp.get("available")
+            if available is None:
+                available = r.get("available", 0)
             sku = None
             barcode = None
             condition_raw = None
