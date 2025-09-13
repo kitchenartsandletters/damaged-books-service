@@ -127,6 +127,7 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
     inv_item = body.get("data", {}).get("inventoryItem")
     if inv_item is None:
         logger.warning(f"[InventoryService] inventoryItem is None for GID={inventory_item_gid}. Possible bad GID or data issue.")
+        logger.warning(f"[InventoryService] Full GraphQL response: {resp}")
         variant = {}
     else:
         variant = inv_item.get("variant") or {}
