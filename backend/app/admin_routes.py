@@ -43,6 +43,7 @@ async def trigger_reconcile(ok = Depends(require_admin_token)):
     On-demand reconcile. (You can also run this via a worker on a schedule.)
     """
     result = await reconcile_damaged_inventory()
+    logger.debug(f"[Admin] reconcile raw result: {result}")
     # Expected shape: {"inspected": N, "updated": M, "skipped": K}
     inspected = result.get("inspected", 0)
     updated = result.get("updated", 0)
