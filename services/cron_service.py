@@ -6,6 +6,7 @@ import asyncio
 from services import damaged_inventory_repo, product_service, notification_service
 import os
 from services.used_book_manager import apply_product_rules_with_product
+from services.inventory_service import resolve_by_inventory_item_id
 
 logger = logging.getLogger(__name__)
 supabase = get_client()
@@ -40,26 +41,40 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
         product_id = int(r["product_id"])
         handle = r["handle"]
         try:
-            gql = """
-            query($inventoryItemId: ID!, $locationId: ID!) {
-              inventoryLevel(inventoryItemId: $inventoryItemId, locationId: $locationId) {
-                available
-              }
-            }
-            """
-            variables = {
-                "inventoryItemId": f"gid://shopify/InventoryItem/{inv_id}",
-                "locationId": f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}",
-            }
-            resp = await shopify_client.graphql(gql, variables)
-            available = ((resp.get("body", {}) or {}).get("data", {})
-                         .get("inventoryLevel", {})
-                         .get("available", 0))
+            resp = await resolve_by_inventory_item_id(inv_id)
+            available = 0
+            sku = None
+            barcode = None
+            condition_raw = None
+            condition_key = None
+            condition = None
 
-            condition = r.get("condition")
-            condition_raw = r.get("condition_raw")
-            condition_key = r.get("condition_key")
-            logger.info(f"Upserting inventory item {inv_id} with condition={condition}, condition_raw={condition_raw}, condition_key={condition_key}")
+            inventory_levels = resp.get("inventoryLevels", {})
+            edges = inventory_levels.get("edges", [])
+            for edge in edges:
+                node = edge.get("node", {})
+                quantities = node.get("quantities", [])
+                for quantity in quantities:
+                    if quantity.get("name") == "available":
+                        available = quantity.get("value", 0)
+                        break
+                # Break if available found
+                if available != 0:
+                    break
+
+            variant = resp.get("variant", {})
+            sku = variant.get("sku")
+            barcode = variant.get("barcode")
+            selected_options = variant.get("selectedOptions", [])
+            for option in selected_options:
+                if option.get("name") == "Condition":
+                    condition_raw = option.get("value")
+                    if condition_raw:
+                        condition_key = condition_raw.lower().replace(" ", "_")
+                    condition = condition_raw
+                    break
+
+            logger.info(f"Upserting inventory item {inv_id} with condition={condition}, condition_raw={condition_raw}, condition_key={condition_key}, available={available}, sku={sku}, barcode={barcode}")
 
             damaged_inventory_repo.upsert(
                 inventory_item_id=inv_id,
@@ -72,8 +87,8 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
                 available=int(available or 0),
                 source="reconcile",
                 title=r.get("title"),
-                sku=r.get("sku"),
-                barcode=r.get("barcode"),
+                sku=sku,
+                barcode=barcode,
             )
             touched.add((product_id, handle))
             updated += 1
