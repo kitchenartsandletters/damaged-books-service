@@ -1,195 +1,143 @@
-Damaged Books Service
 
-A FastAPI service that reacts to Shopify inventory level updates and applies business rules for damaged books: decide whether to publish/unpublish the damaged‑book product, set SEO canonicals, and create/remove redirects to the “new book” product. It’s designed to be fed by your Webhook Gateway, which forwards Shopify webhooks with the original raw body and headers intact.
+# Damaged Books Service (DBS)
 
----
-
-## Quick Reference: Shopify Theme Structure
-
-- **Render blocks**: Theme sections and blocks are modular Liquid files that determine the layout and content on different pages (e.g., `main-product.liquid`, `product.json`). Sections can be dynamic or static, and blocks allow for flexible arrangement of content.
-- **Snippets**: Reusable chunks of Liquid code included in multiple templates or sections (e.g., `product-card.liquid`, `price.liquid`). Snippets help avoid code duplication and keep themes maintainable.
-- **Schema**: Each section can include a `{% schema %}` tag in JSON, defining settings, blocks, and presets. This schema powers the Theme Customizer, allowing merchants to configure content and layout visually.
-- **Theme Customizer behavior**: The Shopify Theme Customizer (Theme Editor) reads section schemas to offer drag-and-drop, visibility toggles, and setting controls for merchants. Blocks defined in schema can be added, removed, or reordered.
-- A fallback block was added in `main-product.liquid` immediately after the description when schema settings for the damaged-book notice are enabled. This ensures the damaged-book notice appears even if the block is missing from `product.json`.
+The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inventory level webhooks for used/damaged book variants, applies business rules (publish/unpublish, SEO canonical, redirects), and persists a normalized view of damaged inventory in Supabase. It is designed to be driven by the Webhook Gateway, which relays Shopify webhooks with original headers and body for robust HMAC verification and replay support.
 
 ---
 
-What’s working today
-	•	✅ Inbound webhook: POST /webhooks/inventory-levels
-Verifies Shopify HMAC using the App secret key (SHOPIFY_API_SECRET), parses JSON, and processes the event.
-	•	✅ Variant & product resolution:
-	1.	REST: variants.json?inventory_item_ids= with defensive post‑filtering; REST can return unrelated variants (full page), so post-filtering is applied to isolate correct variants. If filtered count is zero, a GraphQL fallback is always attempted to reliably map inventory_item_id → variant_id, product_id, handle. Logs include counts for both REST and GQL calls. Defensive handling for API rate limits and retries is in place.
-	2.	GraphQL fallback: reliably maps inventory_item_id → variant_id, product_id, handle
-	•	✅ Business rule entry point: used_book_manager.process_inventory_change(...)
-Currently identifies damaged‑book handles and skips non‑damaged products (observed in logs).
-	•	✅ Gateway integration:
-		Gateway forwards the raw JSON + Shopify headers and (optionally) an X-Available-Hint derived from the payload. Service accepts and logs this hint; it’s not yet damaged in decisions.
-	•	✅ Railway deployment:
-		Correct start command and port; health endpoint responds {"status":"ok"}.
-	•	✅ Fallback logic is implemented for when `product.json` is regenerated, using schema settings and Theme Customizer toggles to render the damaged-book notice block even if it is missing from the JSON template.
+## System Overview
 
-⸻
+### Modern Flow
+1. **Webhook ingestion:** Shopify emits `inventory_levels/update` → Gateway receives, verifies Shopify HMAC, and forwards the raw POST (body + headers) to DBS `/webhooks/inventory-levels`.
+2. **HMAC verification:** DBS verifies the Shopify HMAC signature (defense-in-depth).
+3. **Variant & product resolution:** 
+    - First, REST `/admin/variants.json?inventory_item_ids=...` (with post-filtering for exact `inventory_item_id`).
+    - Always falls back to GraphQL if REST is ambiguous or empty, to reliably map `inventory_item_id` to `variant_id`, `product_id`, and handle.
+4. **Condition extraction:** 
+    - DBS queries Shopify GraphQL for the variant’s `selectedOptions` (esp. `Condition`) to determine if this is a damaged book and which condition (Light, Moderate, Heavy).
+    - No longer uses handle regex for detection.
+5. **Persistence:** 
+    - DBS calls Supabase function `damaged.damaged_upsert_inventory(...)` to upsert the normalized row in `damaged.inventory`.
+    - View `damaged.inventory_view` is used for queries; `damaged.changelog` is available for auditing.
+6. **Business rules:** 
+    - If the variant is a damaged book, DBS checks stock (via inventory_service), publishes/unpublishes (product_service), sets canonical (seo_service), and manages redirects (redirect_service).
+    - All rules are idempotent and run only for recognized damaged variants.
+7. **Response:** 
+    - Always returns 200 for app errors (to avoid Shopify retries), 401 only for HMAC signature failures.
 
-What’s intentionally not done yet
-	•	⏳ Applying the available_hint to decision logic (we only log it today).
-	•	⏳ Finalized inventory_service, seo_service, and redirect_service behaviors in production scenarios.
-	•	⏳ Broader webhook topics (we currently focus on inventory_levels/update).
-	•	⏳ Pagination for batch scans and richer notification channels.
+---
 
-⸻
+## Key Services and Responsibilities
 
-High‑level flow
+- **inventory_service:** Checks real-time stock via Shopify GraphQL (`inventoryLevel(inventoryItemId, locationId)`), used for all availability logic.
+- **used_book_manager:** Orchestrates the main flow: receives inventory updates, resolves variant/product, extracts condition, persists to Supabase, and triggers business rules.
+- **product_service:** Publishes or unpublishes the damaged book product on Shopify as needed.
+- **seo_service:** Updates SEO canonical links so damaged book pages canonicalize to the new/primary product.
+- **redirect_service:** Creates or removes redirects from damaged book URLs to the canonical product.
 
-Shopify ──(inventory_levels/update)──> Webhook Gateway
-   • Gateway validates Shopify HMAC
-   • External Delivery Service → Signed POST with raw Shopify body + headers
-   • Logs to Supabase, including delivery results with retries
-   • Forwards raw body + Shopify headers to Damaged Books Service
-              │
-              ▼
-Damaged Books Service
-   1) Verifies Shopify HMAC again (defense‑in‑depth)
-   2) Parses payload, extracts inventory_item_id (+ logs optional available_hint)
-   3) Resolve variant/product:
-        a) REST variants.json with post‑filtering
-        b) GQL fallback if REST returns noisy page or filtered count is zero
-   4) If handle indicates a damaged book:
-        - Check stock (inventory_service)
-        - Publish/unpublish (product_service)
-        - Update canonical (seo_service)
-        - Create/remove redirect (redirect_service)
-   5) Return 200 always for app errors to avoid Shopify auto‑retries
+---
 
+## Supabase Schema
 
-⸻
+- **Schema:** `damaged`
+- **Table:** `damaged.inventory` (PK: `inventory_item_id`)
+- **View:** `damaged.inventory_view` (adds computed stock status and joins)
+- **Changelog:** `damaged.changelog` (optional/future)
+- **Upsert Function:** `damaged.damaged_upsert_inventory(...)` (SECURITY DEFINER, sets `search_path` to `public, damaged`)
 
-Endpoints
-	•	GET /health → {"status":"ok"}
-	•	POST /webhooks/inventory-levels
-Verified by X-Shopify-Hmac-Sha256. Expects Shopify inventory payload. Accepts forwarded requests from the Gateway with preserved Shopify headers and optional X-Gateway-* headers. Idempotency is expected if X-Gateway-Event-ID is present.
-	•	(Utility) POST /api/products/check
-Manually invoke process_inventory_change with product_id, variant_id, inventory_item_id.
-	•	(Utility) POST /api/products/scan-all
-Placeholder batch scan.
-	•	(Utility) GET /api/products, GET /api/products/{product_id}, PUT /api/products/{product_id}/publish|unpublish
-	•	(Utility) GET/POST/DELETE /api/redirects[...]
-Redirect helpers (scaffolded).
+---
 
-## 🔎 Backend health checks (Damaged Books Service)
+## Damaged-Book Detection (Current)
 
-Export your env once per terminal session:
+- **Detection is based on Shopify variant options:**
+    - The variant must have a `Condition` option with value `Light`, `Moderate`, or `Heavy`.
+    - This is extracted via Shopify GraphQL (`selectedOptions`), not by handle regex.
+- **Handles and tags are not used for detection.**
+- **If the variant is not a damaged book, the event is skipped.**
+
+---
+
+## Endpoints
+
+- `GET /health` — Health check. Returns `{"status":"ok"}`
+- `POST /webhooks/inventory-levels` — Main webhook endpoint. Expects Shopify HMAC, original body, and headers (via Gateway).
+- **Admin endpoints (require `X-Admin-Token`):**
+    - `GET /admin/docs` — Link hub for admin tools.
+    - `GET /admin/damaged-inventory` — List current damaged inventory (header: `X-Result-Count`).
+    - `POST /admin/reconcile` — Run a full reconcile/refresh pipeline (see below).
+    - `GET /admin/reconcile/status` — Latest reconcile stats.
+- **Utility endpoints:** (for diagnostics/dev)
+    - `POST /api/products/check` — Manually trigger inventory logic for a specific variant.
+    - `POST /api/products/scan-all` — Batch scan (placeholder).
+    - `GET /api/products`, `GET /api/products/{product_id}`, `PUT /api/products/{product_id}/publish|unpublish` — Product helpers.
+    - `GET/POST/DELETE /api/redirects[...]` — Redirect helpers.
+
+---
+
+## Webhook Gateway Integration
+
+- The Gateway **must** forward:
+    - All original Shopify headers, especially `X-Shopify-Hmac-Sha256`.
+    - The exact raw request body (no re-stringification).
+    - Optionally, `X-Gateway-Event-ID` (for idempotency), `X-Available-Hint` (mirrors `available`), and Gateway-side HMAC signature headers.
+- DBS verifies Shopify HMAC (using `SHOPIFY_API_SECRET`).
+- If present, DBS logs Gateway HMAC and event ID for traceability.
+
+---
+
+## Replay & Reconcile Pipeline
+
+- **Replay:** Gateway can replay any webhook delivery by ID, forwarding the exact raw bytes and headers. DBS verifies HMAC and processes as if live.
+- **Reconcile:** Admin endpoint `/admin/reconcile` walks all rows in `damaged.inventory_view`, fetches current Shopify inventory via GraphQL, and upserts latest status via `damaged_upsert_inventory`. This ensures DBS/Supabase state matches Shopify reality (even if webhooks were dropped).
+- **End-to-end tests:** Confirm that live webhooks, replayed events, and reconcile runs all result in correct Supabase state and business rule execution.
+
+---
+
+## Health Checks & curl Examples
 
 ```sh
 export VITE_DBS_BASE_URL="https://used-books-service-production.up.railway.app"
 export VITE_DBS_ADMIN_TOKEN="YOUR_LONG_RANDOM_TOKEN"
 
-#Health
+# Health
 curl -i "$VITE_DBS_BASE_URL/health"
 # expect: 200 {"status":"ok"}
 
-#Docs link hub
+# Admin docs
 curl -i "$VITE_DBS_BASE_URL/admin/docs" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
-# expect: 200 and a small JSON list of links
+# expect: 200 + JSON
 
-#List damaged inventory (adds count header)
+# List damaged inventory
 curl -i "$VITE_DBS_BASE_URL/admin/damaged-inventory" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
-# expect: 200 and header X-Result-Count: <n>
+# expect: 200, header X-Result-Count: <n>
 
-
-#Trigger reconcile (GQL-based)
+# Trigger reconcile
 curl -i -X POST "$VITE_DBS_BASE_URL/admin/reconcile" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
 # expect: 200 {"inspected":N,"updated":M,"skipped":K}
 
-#Get reconcile status (latest run)
+# Reconcile status
 curl -i "$VITE_DBS_BASE_URL/admin/reconcile/status" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
-# expect: 200 {"inspected":N,"updated":M,"skipped":K,"note":..., "at":"2025-08-18T21:05:18.286561+00:00"}
+# expect: 200 {"inspected":N,"updated":M,"skipped":K,"note":..., "at":"..."}
+```
 
-## 📦 Damaged Inventory Pipeline (current)
+---
 
-**Canonical source:** Damaged Books Service (DBS).  
-DBS mixes live webhooks with periodic GQL reconcile and persists a normalized view in Supabase.
+## Local Development & HMAC Test
 
-- **Webhook ingest**: Shopify → Gateway (HMAC-verified) → DBS `/webhooks/inventory-levels`
-- **Variant resolution**: REST `variants.json` (defensive) + GQL fallback to map `inventory_item_id → (variant_id, product_id, handle)`
-- **Condition parsing**: handle patterns  
-  - Legacy: `<base>-(hurt|used|damaged|damage)-(light|moderate|mod|heavy)`  
-  - New: `<base>-(light|moderate|heavy)-damage`
-- **Upsert**: `damaged.damaged_upsert_inventory(...)` writes to `damaged.inventory`; view is `damaged.inventory_view`
-- **Reconcile**: `/admin/reconcile` walks current rows and confirms `available` via Shopify **GraphQL** (`inventoryLevel(inventoryItemId, locationId)`), then upserts with `source='reconcile'`
-- **Admin endpoints**:
-  - `GET /admin/damaged-inventory` → JSON of current rows (+ header `X-Result-Count`)
-  - `POST /admin/reconcile` → `{"inspected":N,"updated":M,"skipped":K}`
-  - `GET /admin/docs` → link hub
-- **Auth**: `X-Admin-Token: $ADMIN_API_TOKEN` (shared secret env on DBS)
-- **CORS**: DBS allows Admin Dashboard origin(s) to read `/admin/*`
-
-
-### Supabase objects
-- `schema damaged`
-- `damaged.inventory` (PK `inventory_item_id`)
-- `damaged.inventory_view` (adds `stock_status`)
-- `damaged.changelog` (optional; future auditing)
-- `damaged.damaged_upsert_inventory(...)` (SECURITY DEFINER; `search_path` set to `public, damaged`)
-
-### Theme/UI fallout protections
-- Product template JSON can be auto-regenerated. We added:
-  - A **schema setting** toggle to enable a fallback block.
-  - A **runtime fallback** that renders `snippets/damaged-book-snippet.liquid` after description if the block is missing.
-- Shopify “damaged” handles refactored to `<base>-<condition>-damage`; snippets updated accordingly.
-
-### Quick health tests
-See **Backend health checks** section above for `curl` snippets.
-
-**✅ Confirmed working after integration with Webhook Gateway replay**
-- Supabase `damaged.damaged_upsert_inventory(...)` now consistently receives replayed events and persists rows.
-- Replay endpoint in Gateway delivers raw Shopify body and headers unchanged → HMAC verified downstream.
-- Reconcile endpoint (`/admin/reconcile`) correctly inspects inventory via GraphQL and upserts back into Supabase.
-- Logs show that `inventory_item_id` resolution works with both REST + GraphQL fallback.
-- Manual replay through Gateway → DBS → Supabase → reconcile verified end-to-end.
-- Reconcile status endpoint (`/admin/reconcile/status`) reliably returns latest inspected/updated counts.
-
-**⛔ Tested but failed**
-- Early reconcile runs zeroed out inventory because the loop was returning inside the `for` prematurely (patched).
-- Initial replay attempts failed when JSON.stringify() was used in Gateway forwarding (broke Shopify HMAC).
-
-**🔁 Corrected / patched**
-- Gateway now forwards the original raw Buffer; DBS HMAC verification passes.
-- Cron service patched to avoid `return` inside loop (so all rows reconcile).
-- Tested real product inventory counts: replay reports available=1, reconcile confirms and persists as 1.
-
-⸻
-
-Environment
-
-Create .env (or set env vars in Railway):
-
-SHOP_URL=your-store.myshopify.com
-SHOPIFY_API_KEY=...              # required by client scaffolding
-SHOPIFY_API_SECRET=...           # App secret key – must match the store’s webhook secret (distinct from Admin API secret)
-SHOPIFY_ACCESS_TOKEN=shpat_...   # Admin API access token
-LOG_LEVEL=INFO                   # optional
-GATEWAY_HMAC_SECRET=...          # optional, for verifying Gateway signatures
-
-Important: HMAC verification for Shopify webhooks must use the webhook secret, previoulsy described as App secret key (variable still retains name SHOPIFY_API_SECRET). This service expects the Gateway to pass through Shopify’s X-Shopify-Hmac-Sha256 header and the original raw body. No separate webhook secret is used here.
-
-⸻
-
-Run locally
-
+```sh
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
 # Set env (or use .env)
-export SHOP_URL=...
+export SHOP_URL=your-store.myshopify.com
 export SHOPIFY_API_SECRET=...
 export SHOPIFY_ACCESS_TOKEN=...
 
 python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 # http://127.0.0.1:8000/health  -> {"status":"ok"}
 
-Local HMAC test
-
+# HMAC test
 cat >/tmp/body.json <<'EOF'
 {"inventory_item_id":123,"location_id":40052293765,"available":5}
 EOF
@@ -202,142 +150,71 @@ curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
   -H "X-Shopify-Topic: inventory_levels/update" \
   -H "X-Shopify-Shop-Domain: your-store.myshopify.com" \
   --data-binary @/tmp/body.json
+```
 
+---
 
-⸻
+## Deployment (Railway)
 
-Deploy on Railway
-	•	Start command:
-uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
-	•	Ensure Public Networking is enabled and the service listens on $PORT.
-	•	Set env vars (SHOP_URL, SHOPIFY_API_SECRET, SHOPIFY_ACCESS_TOKEN, etc.).
-	•	Health check: GET /health should return {"status":"ok"}.
+- **Start command:**  
+  `uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT`
+- **Public Networking:** Must be enabled.
+- **Environment variables:**  
+  - `SHOP_URL`, `SHOPIFY_API_SECRET`, `SHOPIFY_ACCESS_TOKEN`, etc.
+- **Health check:**  
+  - `GET /health` returns `{"status":"ok"}`
 
-⸻
+---
 
-Gateway integration (what we expect)
+## Implementation Notes
 
-The Webhook Gateway forwards the exact Shopify request:
+- **HMAC verification:**  
+  - Always use the Shopify webhook secret (`SHOPIFY_API_SECRET`) for HMAC. The Gateway must forward the original bytes and `X-Shopify-Hmac-Sha256`.
+- **Variant/product resolution:**  
+  - REST `variants.json` is post-filtered; always falls back to GraphQL for accuracy.
+- **Condition extraction:**  
+  - Only variants with a `Condition` option of `Light`, `Moderate`, or `Heavy` are considered damaged.
+- **Business rules:**  
+  - Logic for publish/unpublish, canonical, and redirect is idempotent and only applies to damaged variants.
+- **Persistence:**  
+  - All events upsert to `damaged.inventory` via Supabase RPC.
+- **Replay & reconcile:**  
+  - Gateway replay and `/admin/reconcile` ensure eventual consistency and recovery from missed events.
 
-Headers forwarded:
-	•	X-Shopify-Hmac-Sha256 (required)
-	•	X-Shopify-Topic (optional but logged)
-	•	X-Shopify-Shop-Domain (optional but logged)
+---
 
-Optional extras (ignored for auth, useful for provenance/observability):
-	•	X-Gateway-Signature / X-Gateway-Timestamp (gateway‑side HMAC)
-	•	X-Available-Hint (a convenience header mirroring available from payload)
+## Troubleshooting
 
-Body:
-	•	Exact raw bytes from Shopify (no re‑serialization). We rely on this for correct HMAC verification and to avoid “null body” issues.
+- **502 “Application failed to respond” (Railway):**  
+  - Ensure service binds to `0.0.0.0:$PORT` and Public Networking is enabled.
+- **401 “Invalid HMAC signature”:**  
+  - Confirm the secret and that the body is the exact raw bytes from Shopify (no re-stringify).
+- **400 “Missing HMAC header”:**  
+  - Gateway must forward `X-Shopify-Hmac-Sha256`.
+- **REST variant API returns unrelated/empty:**  
+  - Service will fall back to GraphQL; check logs for fallback.
+- **“Product is not a damaged book, skipping”:**  
+  - Variant did not have a `Condition` option of `Light`, `Moderate`, or `Heavy`.
+- **Replay HMAC mismatch:**  
+  - Ensure Gateway forwards the raw Buffer, not a re-serialized body.
+- **Duplicate deliveries:**  
+  - DBS expects idempotency if `X-Gateway-Event-ID` is present.
 
-⸻
+---
 
-Implementation notes
+## Roadmap
 
-HMAC verification
-	•	We compute base64(hmac_sha256(app_secret, raw_body)) and compare with X-Shopify-Hmac-Sha256.
-	•	A 401 is returned only when the signature doesn’t match. App errors return 200 to avoid Shopify retries, but we log them.
+- Use `available_hint` for faster stock checks.
+- Further harden `inventory_service` with Shopify GraphQL.
+- Expand to additional Shopify webhook topics.
+- Add structured logging and richer notifications.
+- Batch pagination for scan-all.
+- Add end-to-end integration tests.
+- Optional Gateway HMAC verification.
+- Support idempotency table keyed by `X-Gateway-Event-ID`.
 
-Variant/product resolution
-	•	Shopify REST variants.json?inventory_item_ids= is occasionally noisy (can return a full page including unrelated variants).
-	•	We post‑filter by inventory_item_id to isolate relevant variants.
-	•	If the filtered count is zero, we always use a GraphQL fallback to resolve the variant and product exactly.
-	•	Logs include counts of variants returned and filtered for REST, and variant/product mapping for GQL.
-	•	Defensive handling for API rate limits and retries is implemented to ensure reliability.
+---
 
-Damaged‑book detection
-	•	A product is considered a damaged book if its handle follows the pattern generated by a new naming convention: handles follow the format `[book-title]: [Light|Moderate|Heavy] Damage`, which are converted to slugs like `book-title-light-damage`.
-	•	Detection is case-insensitive.
-	•	A centralized helper function `parse_damaged_handle` is used to parse and recognize such handles.
-	•	In the future, tag-based detection may be supported.
-	•	If the product isn’t a damaged book, we skip (observed in production logs).
-
-Business rules (scaffolded)
-	•	inventory_service.is_variant_in_stock(variant_id, inventory_item_id) — source of truth for stock checks.
-	•	product_service.set_product_publish_status(product_id, publish=True|False) — publish/unpublish damaged product.
-	•	seo_service.update_used_book_canonicals(product, new_book_handle) — set canonical to the “new book.”
-	•	redirect_service.create_redirect(from_handle, to_handle) / delete_redirect(redirect_id) — manage redirects.
-	•	Publish/unpublish, SEO canonical, and redirect logic are idempotent and skip work if state is already correct.
-	•	These run only when the handle is recognized as a damaged book.
-
-⸻
-
-Testing guide
-	1.	Health
-		curl -s https://<railway-domain>/health
-	2.	Signed local webhook (above)
-	3.	Gateway → Service end‑to‑end
-	•	Trigger a real inventory change in Shopify (or send a signed test via Gateway).
-	•	Confirm on the service:
-		•	HMAC validated
-		•	Variant/product resolved (GQL fallback if needed)
-		•	Damaged‑book detection either “skip” or business rule applied
-		•	200 OK response (Shopify won’t retry)
-		•	Confirm on Gateway:
-			•	webhook_logs row written
-			•	external_deliveries row shows 200 and outcome body (e.g., "no-op" or "success")
-	4.	Forwarded request from Gateway
-	•	Verify both Shopify HMAC and optional Gateway HMAC signatures.
-	•	Confirm Supabase logs the external delivery with retries.
-
-⸻
-
-Troubleshooting
-	•	502 “Application failed to respond” (Railway):
-		Start command must bind to 0.0.0.0:$PORT (not a fixed port like 8000) and Public Networking must be enabled.
-	•	401 “Invalid HMAC signature”:
-		Make sure you’re using the App secret key (SHOPIFY_API_SECRET) and that the body is the exact raw bytes Shopify sent. Don’t re‑stringify.
-	•	401 with valid Shopify HMAC but invalid Gateway HMAC (if verifying both):
-		Check GATEWAY_HMAC_SECRET and Gateway signature verification logic.
-	•	400 “Missing HMAC header”:
-		The Gateway must forward X-Shopify-Hmac-Sha256. If you hit the service directly with curl, you must compute and pass it.
-	•	variants_count=250 with filtered=0:
-		This indicates the REST endpoint returned a page that didn’t include your inventory_item_id. The service will use GraphQL fallback automatically. If you never see the GQL logs, deploy the latest build.
-	•	“Product is not a damaged book, skipping”:
-		The product handle didn’t match the damaged‑book pattern. That’s expected for most store inventory.
-	•	Duplicate deliveries with X-Gateway-Event-ID:
-		The service expects idempotency keyed by this header to prevent duplicate processing.
-
-- **Reconcile sets available=0 unexpectedly**:
-  This was traced to an early `return` inside the loop in `cron_service.py`. Fix: ensure the loop processes all rows before returning. After patch, reconcile persists correct availability.
-
-- **Replay → HMAC mismatch**:
-  Ensure the Gateway forwards the raw request body (`Buffer`) untouched; any re-serialization (e.g. `JSON.stringify()`) breaks HMAC verification. This was fixed and tested—replay now works.
-
-⸻
-
-Roadmap
-	•	Use available_hint to short‑circuit/validate stock checks.
-	•	Harden inventory_service with Shopify Inventory APIs and/or GraphQL inventory queries.
-	•	Expand to additional topics (e.g., variant updates affecting damaged/new mapping).
-	•	Add structured logging and richer notifications (Slack/email).
-	•	Batch pagination for scan_all_used_books.
-	•	End‑to‑end integration tests.
-	•	Implement optional Gateway HMAC verification.
-	•	Support idempotency table keyed by X-Gateway-Event-ID.
-
-⸻
-
-Changelog (recent)
-	•	Added GraphQL fallback for inventory_item_id → variant/product resolution.
-	•	Gateway now forwards raw Shopify bytes + headers; service verifies HMAC reliably.
-	•	Introduced optional X-Available-Hint pass‑through; service logs it.
-	•	Fixed Railway start command to use $PORT.
-	•	Cleaned up async usage (awaited client calls) and improved diagnostics.
-	•	Added Gateway forwarding integration (raw body + headers).
-	•	Implemented optional Gateway HMAC verification.
-	•	Added external delivery logging with retries.
-	•	Hardened REST + GraphQL variant resolution with defensive filtering and retry logic.
-	•	Added schema settings and fallback block logic for damaged-book notice when `product.json` regenerates.
-	•	Updated handle pattern and centralized parsing helper (`parse_damaged_handle`) to support `[Title]: [Condition Damage]` format.
-	•	Integrated Supabase `damaged_upsert_inventory` into replay flow; verified successful persistence.
-	•	Fixed `cron_service.py` loop to avoid early return that zeroed out inventory.
-	•	Confirmed replay + reconcile round-trip on real Shopify test product (`available=1`).
-	•	Validated Gateway forwarding fix (no JSON.stringify) preserves Shopify HMAC signature.
-
-⸻
-
-License
+## License
 
 Private/internal.

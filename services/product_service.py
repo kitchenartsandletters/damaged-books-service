@@ -7,6 +7,11 @@ from services.shopify_client import shopify_client
 logger = logging.getLogger(__name__)
 
 def parse_damaged_handle(handle: str) -> tuple[str, str]:
+    """
+    Deprecated: Legacy function to parse damaged book handles.
+    Use `used_book_manager` and `inventory_service` instead.
+    """
+    logger.warning("parse_damaged_handle is deprecated. Use 'used_book_manager' and 'inventory_service' instead.")
     import re
     h = (handle or "").lower()
     # Legacy: <base>-(hurt|used|damaged|damage)-(light|moderate|mod|heavy)
@@ -20,19 +25,34 @@ def parse_damaged_handle(handle: str) -> tuple[str, str]:
     return handle, None
 
 def is_used_book_handle(handle: str) -> bool:
+    """
+    Deprecated: Check if handle is for a used book.
+    Use `used_book_manager` and `inventory_service` instead.
+    """
+    logger.warning("is_used_book_handle is deprecated. Use 'used_book_manager' and 'inventory_service' instead.")
     base, condition = parse_damaged_handle(handle)
     return condition is not None
 
 def get_new_book_handle_from_used(used_handle: str) -> str:
+    """
+    Deprecated: Extract new book handle from a used book handle.
+    Use `used_book_manager` and `inventory_service` instead.
+    """
+    logger.warning("get_new_book_handle_from_used is deprecated. Use 'used_book_manager' and 'inventory_service' instead.")
     base, condition = parse_damaged_handle(used_handle)
     return base
 
 def parse_condition_from_handle(handle: str) -> str | None:
+    """
+    Deprecated: Parse condition from a book handle.
+    Use `used_book_manager` and `inventory_service` instead.
+    """
+    logger.warning("parse_condition_from_handle is deprecated. Use 'used_book_manager' and 'inventory_service' instead.")
     _, cond = parse_damaged_handle(handle)
     return cond
 
 def is_damaged_handle(handle: str) -> bool:
-    """Alias for is_used_book_handle to support both names in code."""
+    """Preferred function to check if a handle is for a damaged or used book."""
     return is_used_book_handle(handle)
 
 async def _publish_to_online_store(product_id: str) -> None:
