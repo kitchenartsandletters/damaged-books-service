@@ -54,9 +54,7 @@ async def apply_product_rules_with_product(product_id: str, damaged_handle: str,
                 else:
                     logger.info(f"[Redirect] Created id={created.get('id')} from {damaged_handle} → {canonical_handle}")
 
-        # Always keep canonical tag pointing to the non-damaged page
-        resolved_canonical_handle = await seo_service.resolve_canonical_handle(damaged_handle=damaged_handle)
-        await seo_service.update_used_book_canonicals({"handle": damaged_handle}, resolved_canonical_handle)
+        # Canonical tag update now handled only in process_inventory_change
     except Exception as e:
         logger.warning(f"[UsedBookManager] apply_product_rules_with_product error: {e}")
 

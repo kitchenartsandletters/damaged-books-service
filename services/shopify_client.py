@@ -222,5 +222,71 @@ class ShopifyClient:
         # else: take first / sum? We’ll take first to be explicit and keep code simple.
         return int(levels[0].get("available") or 0) if levels else 0
 
+    async def get_product_metafield(self, product_gid: str, namespace: str, key: str) -> Optional[str]:
+        """
+        Fetches a product metafield value by product GID, namespace, and key using GraphQL.
+        Returns the metafield value as a string (or None if not found).
+        """
+        query = """
+        query($id: ID!, $namespace: String!, $key: String!) {
+          product(id: $id) {
+            metafield(namespace: $namespace, key: $key) {
+              id
+              namespace
+              key
+              value
+            }
+          }
+        }
+        """
+        variables = {"id": product_gid, "namespace": namespace, "key": key}
+        try:
+            data = await self.graph(query, variables)
+            metafield = (data or {}).get("data", {}).get("product", {}).get("metafield")
+            if metafield and metafield.get("value") is not None:
+                logger.info(f"[ShopifyClient] Fetched metafield: namespace={namespace}, key={key}, value={metafield['value']}")
+                return metafield["value"]
+            else:
+                logger.info(f"[ShopifyClient] Metafield not found for product_gid={product_gid}, namespace={namespace}, key={key}")
+                return None
+        except Exception as e:
+            logger.error(f"[ShopifyClient] Error fetching metafield: {e}")
+            return None
+
+    async def set_product_metafield(self, product_id: str, canonical_handle: str) -> Optional[dict]:
+        """
+        Sets a product metafield with namespace 'custom', key 'canonical_handle', and the given value.
+        Uses the Admin GraphQL API.
+        """
+        mutation = """
+        mutation($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id namespace key value }
+            userErrors { field message }
+          }
+        }
+        """
+        owner_id = f"gid://shopify/Product/{product_id}"
+        metafields = [{
+            "namespace": "custom",
+            "key": "canonical_handle",
+            "value": str(canonical_handle),
+            "type": "single_line_text_field",
+            "ownerId": owner_id
+        }]
+        variables = {"metafields": metafields}
+        try:
+            data = await self.graph(mutation, variables)
+            result = (data or {}).get("data", {}).get("metafieldsSet", {})
+            user_errors = result.get("userErrors", [])
+            if user_errors:
+                logger.error(f"[ShopifyClient] Error setting metafield: {user_errors}")
+                return None
+            metafields_ret = result.get("metafields", [])
+            logger.info(f"[ShopifyClient] Set metafield for product_id={product_id} canonical_handle={canonical_handle} result={metafields_ret}")
+            return metafields_ret
+        except Exception as e:
+            logger.error(f"[ShopifyClient] Exception setting metafield: {e}")
+            return None
 
 shopify_client = ShopifyClient()

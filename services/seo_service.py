@@ -8,23 +8,15 @@ from typing import Optional
 
 async def update_used_book_canonicals(product, new_book_handle):
     """
-    Determines the canonical handle for a damaged book product.
-    Resolution order:
-      1. Redirect service (if a redirect exists for the handle)
-      2. Handle match (strip '-damaged')
-      3. Shopify metafield override
+    Determines the canonical handle for a damaged book product by resolving it and writing to metafield.
     Returns a dict with resolution method, canonical_handle, product_id, and written status.
     """
     product_id = product['id']
     handle = new_book_handle.strip()
     logging.info(f"Updating canonical tags for product {product_id} with damaged handle '{handle}'")
 
-    # 1. Try redirect service
-    redirect = await redirect_service.find_redirect_by_path(handle)
-    if redirect and 'target' in redirect and redirect['target']:
-        canonical_handle = redirect['target']
-        logging.info(f"Canonical handle resolved by redirect: {canonical_handle}")
-        # Write back canonical handle to metafield
+    try:
+        canonical_handle = await resolve_canonical_handle(handle, product)
         written = False
         try:
             await shopify_client.set_product_metafield(product_id, namespace='custom', key='canonical_handle', value=canonical_handle)
@@ -33,63 +25,19 @@ async def update_used_book_canonicals(product, new_book_handle):
         except Exception as e:
             logging.warning(f"Error writing canonical handle metafield for product {product_id}: {e}")
         return {
-            "resolution": "redirect",
+            "resolution": "resolved",
             "canonical_handle": canonical_handle,
             "product_id": product_id,
             "written": written
         }
-
-    # 2. Try handle match (strip '-damaged')
-    if handle.endswith("-damaged"):
-        base_handle = handle[:-len("-damaged")]
-        if base_handle:
-            logging.info(f"Canonical handle resolved by handle match: {base_handle}")
-            # Write back canonical handle to metafield
-            written = False
-            try:
-                await shopify_client.set_product_metafield(product_id, namespace='custom', key='canonical_handle', value=base_handle)
-                written = True
-                logging.info(f"Written canonical handle '{base_handle}' to metafield for product {product_id}")
-            except Exception as e:
-                logging.warning(f"Error writing canonical handle metafield for product {product_id}: {e}")
-            return {
-                "resolution": "handle_match",
-                "canonical_handle": base_handle,
-                "product_id": product_id,
-                "written": written
-            }
-
-    # 3. Try metafield override
-    try:
-        metafield = await shopify_client.get_product_metafield(product_id, 'canonical_handle')
-        if metafield and metafield.get('value'):
-            canonical_handle = metafield['value']
-            logging.info(f"Canonical handle resolved by metafield: {canonical_handle}")
-            # Write back canonical handle to metafield
-            written = False
-            try:
-                await shopify_client.set_product_metafield(product_id, namespace='custom', key='canonical_handle', value=canonical_handle)
-                written = True
-                logging.info(f"Written canonical handle '{canonical_handle}' to metafield for product {product_id}")
-            except Exception as e:
-                logging.warning(f"Error writing canonical handle metafield for product {product_id}: {e}")
-            return {
-                "resolution": "metafield",
-                "canonical_handle": canonical_handle,
-                "product_id": product_id,
-                "written": written
-            }
     except Exception as e:
-        logging.warning(f"Error fetching metafield for product {product_id}: {e}")
-
-    # Failed to resolve
-    logging.warning(f"Failed to resolve canonical handle for product {product_id} with handle '{handle}'")
-    return {
-        "resolution": "failed",
-        "canonical_handle": None,
-        "product_id": product_id,
-        "written": False
-    }
+        logging.warning(f"Failed to resolve and write canonical handle for product {product_id} with handle '{handle}': {e}")
+        return {
+            "resolution": "failed",
+            "canonical_handle": None,
+            "product_id": product_id,
+            "written": False
+        }
 
 async def resolve_canonical_handle(damaged_handle: str, product: dict | None = None) -> str:
     """
@@ -97,7 +45,7 @@ async def resolve_canonical_handle(damaged_handle: str, product: dict | None = N
     Resolution order:
       1. Strip '-damaged' from handle.
       2. Check redirect service.
-      3. Check Shopify product existence.
+      3. Check Shopify product existence via GraphQL.
       4. Fallback to stripped handle.
     Returns the canonical handle string.
     """
@@ -123,17 +71,23 @@ async def resolve_canonical_handle(damaged_handle: str, product: dict | None = N
     except Exception as e:
         logger.warning(f"Error checking redirect for handle '{stripped}': {e}")
 
-    # 3. Check Shopify product existence
+    # 3. Check Shopify product existence via GraphQL
     try:
-        endpoint = f"/products/{stripped}.json"
-        response = await shopify_client.get(endpoint)
-        if response and response.get("product"):
-            logger.info(f"Canonical handle resolved via Shopify product: '{stripped}'")
+        query = """
+        query productByHandle($handle: String!) {
+          productByHandle(handle: $handle) { id handle title }
+        }
+        """
+        variables = {"handle": stripped}
+        response = await shopify_client.graphql(query, variables)
+        product_data = response.get("data", {}).get("productByHandle")
+        if product_data:
+            logger.info(f"Canonical handle resolved via Shopify product (GraphQL): '{stripped}'")
             return stripped
         else:
-            logger.info(f"No Shopify product found for handle '{stripped}'")
+            logger.info(f"No Shopify product found for handle '{stripped}' via GraphQL")
     except Exception as e:
-        logger.warning(f"Error fetching Shopify product for handle '{stripped}': {e}")
+        logger.warning(f"Error fetching Shopify product for handle '{stripped}' via GraphQL: {e}")
 
     # 4. Fallback to stripped
     logger.info(f"Falling back to stripped handle: '{stripped}'")
