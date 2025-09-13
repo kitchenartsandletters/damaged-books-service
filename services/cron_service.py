@@ -6,6 +6,7 @@ import asyncio
 from services import damaged_inventory_repo, product_service, notification_service
 import os
 from services.used_book_manager import apply_product_rules_with_product
+from services import seo_service
 from services.inventory_service import resolve_by_inventory_item_id
 
 logger = logging.getLogger(__name__)
@@ -87,12 +88,11 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
             skipped += 1
     # Apply product-level rules once per damaged product we touched
     for (pid, handle) in touched:
-        if handle.endswith("-damaged"):
-            canonical = handle.removesuffix("-damaged")
-            try:
-                await apply_product_rules_with_product(str(pid), handle, canonical)
-            except Exception as e:
-                logger.warning(f"Failed to apply product rules for {handle}: {e}")
+        canonical = seo_service.resolve_canonical_handle(handle)
+        try:
+            await apply_product_rules_with_product(str(pid), handle, canonical)
+        except Exception as e:
+            logger.warning(f"Failed to apply product rules for {handle}: {e}")
 
     note = "missing SHOPIFY_LOCATION_ID" if not SHOPIFY_LOCATION_ID else None
 

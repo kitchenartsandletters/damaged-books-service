@@ -55,7 +55,8 @@ async def apply_product_rules_with_product(product_id: str, damaged_handle: str,
                     logger.info(f"[Redirect] Created id={created.get('id')} from {damaged_handle} → {canonical_handle}")
 
         # Always keep canonical tag pointing to the non-damaged page
-        await seo_service.update_used_book_canonicals({"handle": damaged_handle}, canonical_handle)
+        resolved_canonical_handle = await seo_service.resolve_canonical_handle(damaged_handle=damaged_handle)
+        await seo_service.update_used_book_canonicals({"handle": damaged_handle}, resolved_canonical_handle)
     except Exception as e:
         logger.warning(f"[UsedBookManager] apply_product_rules_with_product error: {e}")
 
@@ -88,46 +89,12 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
         logger.info(f"[Inventory] Damaged book {handle} stock status: {'in stock' if is_in_stock else 'out of stock'}")
 
         # Canonical target
-        new_book_handle = product_service.get_new_book_handle_from_used(handle)
+        canonical_handle = await seo_service.resolve_canonical_handle(damaged_handle=handle, product=product)
 
         # Always set canonicals toward the new book page
-        canonical_set = await seo_service.update_used_book_canonicals(product, new_book_handle)
+        canonical_set = await seo_service.update_used_book_canonicals(product, canonical_handle)
 
-        if is_in_stock:
-            # Publish
-            updated = await product_service.set_product_publish_status(product_id, True)
-            logger.info(f"[Publish] Published damaged book {handle} (id={product_id})")
-
-            # Remove redirect if exists
-            existing = await redirect_service.find_redirect_by_path(handle)
-            if existing:
-                deleted = await redirect_service.delete_redirect(str(existing.get("id")))
-                if deleted is not True and deleted not in (200, 204):
-                    logger.warning(f"[Redirect] Failed to delete redirect id={existing.get('id')} for {handle}")
-                    notification_service.notify(
-                        "warning",
-                        "Redirect Removal Failed",
-                        f"Could not remove redirect for {handle} (id={existing.get('id')})"
-                    )
-        else:
-            # Unpublish
-            updated = await product_service.set_product_publish_status(product_id, False)
-            logger.info(f"[Publish] Unpublished damaged book {handle} (id={product_id})")
-
-            # Create redirect if missing
-            existing = await redirect_service.find_redirect_by_path(handle)
-            if not existing:
-                created = await redirect_service.create_redirect(handle, new_book_handle)
-                if created is None:
-                    # Single warning path; avoid duplicate “failed to create” + “operation error”
-                    logger.warning(f"[Redirect] Creation returned empty/invalid result for {handle} → {new_book_handle}")
-                    notification_service.notify(
-                        "warning",
-                        "Redirect Creation Failed",
-                        f"Could not create redirect from {handle} to {new_book_handle}"
-                    )
-                else:
-                    logger.info(f"[Redirect] Created id={created.get('id')} from {handle} → {new_book_handle}")
+        # Removed inline publish/unpublish and redirect logic per instructions
 
         # Resolve variant + product + condition via Admin GraphQL using inventory_item_id
         condition_raw = None
@@ -190,9 +157,8 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             barcode=(str(variant_data.get("barcode")) if variant_data else None),
         )
 
-        # Apply product-level rules once per product
-        new_book_handle = product_service.get_new_book_handle_from_used(handle)
-        await apply_product_rules_with_product(product_id, handle, new_book_handle)
+        # Apply product-level rules once per product (handle publish/unpublish and redirects)
+        await apply_product_rules_with_product(product_id, handle, canonical_handle)
 
         return {
             "productId": product_id,

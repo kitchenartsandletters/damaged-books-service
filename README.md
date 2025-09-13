@@ -221,6 +221,53 @@ curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
 - Optional Gateway HMAC verification.
 - Support idempotency table keyed by `X-Gateway-Event-ID`.
 
+
+## Canonical URLs
+
+Short version:
+	•	#1: product.seo is only title + meta description. There is no per-product canonical URL field in the Admin API. Shopify’s own docs confirm that Product.seo contains just an SEO title and description.  ￼
+	•	#2: The <link rel="canonical" …> tag you see in your theme comes from the Liquid global canonical_url. It’s computed at render time by Shopify, not something you “store” or can set via API. Shopify’s theme docs show exactly this pattern and state that canonical_url is provided by Shopify.  ￼
+	•	#3: Because of #1 and #2, you can’t “set” canonicals through product.seo. To control the canonical target for damaged products, you must override what the theme outputs—typically by checking a product metafield and, if present, outputting your own canonical link (otherwise fall back to {{ canonical_url }}).
+
+So to answer your exact questions:
+	•	“Where is canonical_url stored?”
+It isn’t stored per product. It’s a Liquid global that Shopify calculates for the current page and exposes to themes. You can use it, but you can’t update it through the Admin API.  ￼
+	•	“Does canonical_handle need to be canonical_url to match theme.liquid?”
+No. Your theme can continue to reference canonical_url by default, but you should conditionally override it when our app has resolved a better canonical. The usual pattern is to store a metafield (e.g., custom.canonical_handle) on the damaged product and have the theme emit <link rel="canonical" href="..."> using that metafield; if it’s not set, fall back to {{ canonical_url }}. (Metafields are first-class content the theme can read.)  ￼
+
+⸻
+
+What we should implement
+	1.	Our app (already in progress):
+	•	Resolve the canonical handle for each damaged product.
+	•	Write that handle into a product metafield (e.g., namespace custom, key canonical_handle).
+	•	Keep it fresh during inventory webhooks and reconcile jobs.
+	2.	Theme update (one-time):
+In theme.liquid (or your head partial), replace the canonical tag with:
+
+{% if template.name == 'product' and product %}
+  {% if product.metafields.custom.canonical_handle %}
+    <link rel="canonical"
+          href="{{ routes.root_url }}/products/{{ product.metafields.custom.canonical_handle | escape }}">
+  {% else %}
+    <link rel="canonical" href="{{ canonical_url }}">
+  {% endif %}
+{% else %}
+  <link rel="canonical" href="{{ canonical_url }}">
+{% endif %}
+
+	•	This matches Shopify’s guidance to include a canonical tag and relies on canonical_url as the safe fallback.  ￼
+
+	3.	Why this is SEO-correct:
+Google’s guidance is to use one canonical URL for duplicate/near-duplicate content. By always canonicalizing damaged SKUs to the undamaged primary page, you consolidate signals and avoid needless indexing of transient damaged pages.  ￼
+
+⸻
+
+TL;DR
+	•	You can’t set canonicals via product.seo; it’s only title/description.  ￼
+	•	canonical_url is a computed Liquid value, not stored per product.  ￼
+	•	The right approach is: app writes a canonical handle metafield on damaged products → theme conditionally emits a canonical tag using that metafield, otherwise falls back to {{ canonical_url }}. This gives us precise, programmatic control over SEO behavior without relying on manual edits.
+
 ---
 
 ## License
