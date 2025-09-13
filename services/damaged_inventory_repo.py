@@ -8,7 +8,7 @@ def upsert(
     product_id: int,
     variant_id: int,
     handle: str,
-    condition: str | None,
+    condition: str | None,  # ← legacy parameter, ignored in upsert and replaced by condition_key
     available: int,
     condition_raw: str | None = None,
     condition_key: str | None = None,
@@ -24,9 +24,9 @@ def upsert(
             "_product_id": product_id,
             "_variant_id": variant_id,
             "_handle": handle or "",
-            "_condition": condition,            # ← legacy column
-            "_condition_raw": condition_raw,    # ← new
-            "_condition_key": condition_key,    # ← new
+            "_condition": condition_key,          # ← legacy column now set to normalized condition_key
+            "_condition_raw": condition_raw,      # ← new
+            "_condition_key": condition_key,      # ← new
             "_available": available,
             "_source": source,
             "_title": title,

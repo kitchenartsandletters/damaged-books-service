@@ -176,7 +176,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             product_id=int(product_id),
             variant_id=int(variant_id),
             handle=handle,
-            condition=variant_data.get("condition"),
+            condition=variant_data.get("condition_key"),
             condition_raw=variant_data.get("condition_raw"),
             condition_key=variant_data.get("condition_key"),
             available=int(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
