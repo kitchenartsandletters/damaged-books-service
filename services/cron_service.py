@@ -42,25 +42,12 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
         handle = r["handle"]
         try:
             resp = await resolve_by_inventory_item_id(inv_id)
-            available = 0
+            available = resp.get("available", 0)
             sku = None
             barcode = None
             condition_raw = None
             condition_key = None
             condition = None
-
-            inventory_levels = resp.get("inventoryLevels", {})
-            edges = inventory_levels.get("edges", [])
-            for edge in edges:
-                node = edge.get("node", {})
-                quantities = node.get("quantities", [])
-                for quantity in quantities:
-                    if quantity.get("name") == "available":
-                        available = quantity.get("value", 0)
-                        break
-                # Break if available found
-                if available != 0:
-                    break
 
             variant = resp.get("variant", {})
             sku = variant.get("sku")
