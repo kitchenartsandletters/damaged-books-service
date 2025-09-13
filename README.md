@@ -1,4 +1,3 @@
-
 # Damaged Books Service (DBS)
 
 The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inventory level webhooks for used/damaged book variants, applies business rules (publish/unpublish, SEO canonical, redirects), and persists a normalized view of damaged inventory in Supabase. It is designed to be driven by the Webhook Gateway, which relays Shopify webhooks with original headers and body for robust HMAC verification and replay support.
@@ -13,8 +12,10 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 3. **Variant & product resolution:** 
     - First, REST `/admin/variants.json?inventory_item_ids=...` (with post-filtering for exact `inventory_item_id`).
     - Always falls back to GraphQL if REST is ambiguous or empty, to reliably map `inventory_item_id` to `variant_id`, `product_id`, and handle.
-4. **Condition extraction:** 
+4. **Condition extraction and persistence:** 
     - DBS queries Shopify GraphQL for the variant’s `selectedOptions` (esp. `Condition`) to determine if this is a damaged book and which condition (Light, Moderate, Heavy).
+    - Both `condition_raw` (human-readable from Shopify, e.g. "Light Damage") and `condition_key` (snake-cased normalized value, e.g. "light_damage") are extracted and stored.
+    - The Supabase function `damaged.damaged_upsert_inventory(...)` expects both values, and DBS ensures they are preserved across webhook, replay, and reconcile flows.
     - No longer uses handle regex for detection.
 5. **Persistence:** 
     - DBS calls Supabase function `damaged.damaged_upsert_inventory(...)` to upsert the normalized row in `damaged.inventory`.
@@ -29,7 +30,7 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 
 ## Key Services and Responsibilities
 
-- **inventory_service:** Checks real-time stock via Shopify GraphQL (`inventoryLevel(inventoryItemId, locationId)`), used for all availability logic.
+- **inventory_service:** Checks real-time stock via Shopify GraphQL (`inventoryLevel(inventoryItemId, locationId)`), used for all availability logic. The reconcile pipeline now calls `resolve_by_inventory_item_id` from this service to fetch both availability and condition info, preserving both fields and falling back to existing DB values if Shopify omits data.
 - **used_book_manager:** Orchestrates the main flow: receives inventory updates, resolves variant/product, extracts condition, persists to Supabase, and triggers business rules.
 - **product_service:** Publishes or unpublishes the damaged book product on Shopify as needed.
 - **seo_service:** Updates SEO canonical links so damaged book pages canonicalize to the new/primary product.
@@ -43,7 +44,8 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 - **Table:** `damaged.inventory` (PK: `inventory_item_id`)
 - **View:** `damaged.inventory_view` (adds computed stock status and joins)
 - **Changelog:** `damaged.changelog` (optional/future)
-- **Upsert Function:** `damaged.damaged_upsert_inventory(...)` (SECURITY DEFINER, sets `search_path` to `public, damaged`)
+- **Upsert Function:** `damaged.damaged_upsert_inventory(...)` (SECURITY DEFINER, sets `search_path` to `public, damaged`)  
+  - Expects both `condition_raw` and `condition_key` to be provided and preserved.
 
 ---
 
@@ -51,7 +53,7 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 
 - **Detection is based on Shopify variant options:**
     - The variant must have a `Condition` option with value `Light`, `Moderate`, or `Heavy`.
-    - This is extracted via Shopify GraphQL (`selectedOptions`), not by handle regex.
+    - Both the human-readable condition (`condition_raw`) and a snake-cased normalized key (`condition_key`) are extracted via Shopify GraphQL (`selectedOptions`), not by handle regex.
 - **Handles and tags are not used for detection.**
 - **If the variant is not a damaged book, the event is skipped.**
 
@@ -88,7 +90,7 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 ## Replay & Reconcile Pipeline
 
 - **Replay:** Gateway can replay any webhook delivery by ID, forwarding the exact raw bytes and headers. DBS verifies HMAC and processes as if live.
-- **Reconcile:** Admin endpoint `/admin/reconcile` walks all rows in `damaged.inventory_view`, fetches current Shopify inventory via GraphQL, and upserts latest status via `damaged_upsert_inventory`. This ensures DBS/Supabase state matches Shopify reality (even if webhooks were dropped).
+- **Reconcile:** Admin endpoint `/admin/reconcile` walks all rows in `damaged.inventory_view`, calls `resolve_by_inventory_item_id` from `inventory_service` to fetch current Shopify inventory via GraphQL, including both availability and condition info, preserving both fields. If Shopify omits condition or availability, existing DB values are preserved. The pipeline then upserts the latest status via `damaged_upsert_inventory`. This ensures DBS/Supabase state matches Shopify reality (even if webhooks were dropped).
 - **End-to-end tests:** Confirm that live webhooks, replayed events, and reconcile runs all result in correct Supabase state and business rule execution.
 
 ---
@@ -174,12 +176,16 @@ curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
   - REST `variants.json` is post-filtered; always falls back to GraphQL for accuracy.
 - **Condition extraction:**  
   - Only variants with a `Condition` option of `Light`, `Moderate`, or `Heavy` are considered damaged.
+  - Both `condition_raw` (human-readable) and `condition_key` (snake-cased normalized) are extracted and persisted.
 - **Business rules:**  
   - Logic for publish/unpublish, canonical, and redirect is idempotent and only applies to damaged variants.
 - **Persistence:**  
-  - All events upsert to `damaged.inventory` via Supabase RPC.
+  - All events upsert to `damaged.inventory` via Supabase RPC, preserving both condition fields.
 - **Replay & reconcile:**  
   - Gateway replay and `/admin/reconcile` ensure eventual consistency and recovery from missed events.
+  - Reconcile now uses Shopify GraphQL directly for availability and conditions, aligning with webhook processing, via `resolve_by_inventory_item_id`.
+- **Reconcile fallback:**  
+  - If Shopify omits condition or availability data during reconcile, existing database values are preserved.
 
 ---
 
@@ -199,6 +205,8 @@ curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
   - Ensure Gateway forwards the raw Buffer, not a re-serialized body.
 - **Duplicate deliveries:**  
   - DBS expects idempotency if `X-Gateway-Event-ID` is present.
+- **Reconcile appears to nullify condition or reset availability:**  
+  - Check logs for resolver results. This is expected behavior if Shopify omits data; DBS preserves existing DB values unless Shopify explicitly reports them.
 
 ---
 
