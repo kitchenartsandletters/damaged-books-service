@@ -29,7 +29,7 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
     location_gid = _to_gid("Location", SHOPIFY_LOCATION_ID)
 
     res = supabase.schema("damaged").from_("inventory").select(
-        "inventory_item_id, product_id, variant_id, handle, condition, title, sku, barcode, available"
+        "inventory_item_id, product_id, variant_id, handle, condition, condition_raw, condition_key, title, sku, barcode, available"
     ).limit(batch_limit).execute()
     rows = res.data or []   
 
