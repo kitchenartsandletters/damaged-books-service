@@ -107,7 +107,7 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
           edges {
             node {
               id
-              location { id name }
+              location { id }
               quantities(names: ["available"]) {
                 name
                 quantity
