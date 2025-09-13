@@ -93,7 +93,7 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
       }
     """
     gql = """
-    query VariantByInventoryItem($inventoryItemId: ID!, $locationId: ID!) {
+    query VariantByInventoryItem($inventoryItemId: ID!) {
       inventoryItem(id: $inventoryItemId) {
         variant {
           id
@@ -103,8 +103,17 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
           selectedOptions { name value }
           product { id handle title }
         }
-        inventoryLevels(first: 1, query: $locationId) {
-          edges { node { available } }
+        inventoryLevels(first: 5) {
+          edges {
+            node {
+              id
+              location { id name }
+              quantities(names: ["available"]) {
+                name
+                quantity
+              }
+            }
+          }
         }
       }
     }
@@ -112,13 +121,18 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
     inventory_item_gid = f"gid://shopify/InventoryItem/{inventory_item_id}"
     variables = {
         "inventoryItemId": inventory_item_gid,
-        "locationId": location_gid,
     }
     resp = await shopify_client.graphql(gql, variables)
     data = ((resp or {}).get("body") or {}).get("data") or {}
     variant = data.get("inventoryItem", {}).get("variant", {}) or {}
     edges = (data.get("inventoryItem", {}).get("inventoryLevels", {}).get("edges") or [])
-    available = (edges[0]["node"]["available"] if edges else 0) or 0
+    available = 0
+    if edges:
+        quantities = edges[0]["node"].get("quantities", [])
+        for q in quantities:
+            if q.get("name") == "available":
+                available = q.get("quantity", 0)
+                break
     logger.info(f"[InventoryService] Raw variant payload: {variant}")
     product = (variant.get("product") or {})
     condition = _extract_condition_from_variant(variant)
