@@ -123,8 +123,18 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
         "inventoryItemId": inventory_item_gid,
     }
     resp = await shopify_client.graphql(gql, variables)
-    body = (resp or {}).get("body") or {}
-    inv_item = body.get("data", {}).get("inventoryItem")
+
+    # Handle both possible shapes of resp:
+    # 1. resp = {"body": {"data": {...}}}
+    # 2. resp = {"data": {...}}
+    body = {}
+    if isinstance(resp, dict):
+        if "body" in resp and isinstance(resp["body"], dict):
+            body = resp["body"]
+        else:
+            body = resp
+
+    inv_item = (body.get("data") or {}).get("inventoryItem")
     if inv_item is None:
         logger.warning(f"[InventoryService] inventoryItem is None for GID={inventory_item_gid}. Possible bad GID or data issue.")
         logger.warning(f"[InventoryService] Full GraphQL response: {resp}")
