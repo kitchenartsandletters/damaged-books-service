@@ -123,8 +123,17 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
         "inventoryItemId": inventory_item_gid,
     }
     resp = await shopify_client.graphql(gql, variables)
-    data = ((resp or {}).get("body") or {}).get("data") or {}
-    variant = data.get("inventoryItem", {}).get("variant", {}) or {}
+    body = (resp or {}).get("body") or {}
+    inv_item = body.get("data", {}).get("inventoryItem")
+    if inv_item is None:
+        logger.warning(f"[InventoryService] inventoryItem is None for GID={inventory_item_gid}. Possible bad GID or data issue.")
+        variant = {}
+    else:
+        variant = inv_item.get("variant") or {}
+        if variant == {}:
+            logger.info(f"[InventoryService] Empty variant returned. Raw GraphQL body: {body}")
+    data = {"inventoryItem": inv_item} if inv_item is not None else {}
+
     edges = (data.get("inventoryItem", {}).get("inventoryLevels", {}).get("edges") or [])
     available = 0
     if edges:
