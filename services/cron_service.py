@@ -61,14 +61,14 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
                     condition = condition_raw
                     break
 
-            logger.info(f"Upserting inventory item {inv_id} with condition={condition}, condition_raw={condition_raw}, condition_key={condition_key}, available={available}, sku={sku}, barcode={barcode}")
+            logger.info(f"Upserting inventory item {inv_id} with condition={condition_raw}, condition_raw={condition_raw}, condition_key={condition_key}, available={available}, sku={sku}, barcode={barcode}")
 
             damaged_inventory_repo.upsert(
                 inventory_item_id=inv_id,
                 product_id=product_id,
                 variant_id=int(r["variant_id"]),
                 handle=handle,
-                condition=condition,
+                condition=condition_raw,
                 condition_raw=condition_raw,
                 condition_key=condition_key,
                 available=int(available or 0),
