@@ -85,7 +85,9 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
            "id": str_gid, "sku": str|None, "barcode": str|None,
            "title": str|None,
            "selectedOptions": [{"name","value"}, ...],
-           "condition": "Light Damage" | "Moderate Damage" | "Heavy Damage" | None
+           "condition": "Light Damage" | "Moderate Damage" | "Heavy Damage" | None,
+           "condition_raw": str|None,
+           "condition_key": str|None
         },
         "product": { "id": str_gid, "handle": str, "title": str }
       }
@@ -107,22 +109,6 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
       }
     }
     """
-    # First fetch inventoryItem to get variant id
-    # But per instructions, we assume upstream logic already resolves variant id from inventory item id
-    # So we need to get variantId from inventory_item_id
-    # Since original code uses inventory_item_id directly, we need to get variantId gid from inventory_item_id
-    # But instructions say to use the variantId constructed from legacy variant id you already resolve in upstream logic
-    # So we will construct variantId gid from inventory_item_id as best effort:
-    # But inventory_item_id is for inventoryItem, not variant.
-    # So to get variantId, we need to fetch inventoryItem first to get variant id
-    # However, instructions say to replace the query to query productVariant directly instead of traversing inventoryItem → variant
-    # So we must assume caller provides variantId instead of inventoryItemId.
-    # But function signature still has inventory_item_id, so we must get variantId from inventory_item_id.
-    # Since we don't have variantId, we cannot proceed without it.
-    # But instructions say "where $variantId is constructed from the legacy variant id you already resolve in upstream logic."
-    # So we will parse variantId from inventory_item_id by converting inventory_item_id to gid format for variant.
-    # This is a best effort and may not be correct in real scenario.
-    # For the purpose of this change, assume variantId is inventory_item_id in gid format for variant.
     variantId = f"gid://shopify/ProductVariant/{inventory_item_id}"
     variables = {
         "variantId": variantId,
@@ -137,10 +123,24 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
     product = (variant.get("product") or {})
     condition = _extract_condition_from_variant(variant)
     variant["condition"] = condition
+
+    # Map Condition from selectedOptions to condition_raw and condition_key
+    condition_raw = None
+    condition_key = None
+    for opt in variant.get("selectedOptions", []):
+        if (opt.get("name") or "").strip().lower() == "condition":
+            condition_raw = opt.get("value")
+            if condition_raw:
+                condition_key = condition_raw.lower().replace(" ", "_")
+            break
+    variant["condition_raw"] = condition_raw
+    variant["condition_key"] = condition_key
+
+    logger.info(f"[InventoryService] Mapped condition_raw='{condition_raw}', condition_key='{condition_key}' for variant id={variant.get('id')}")
+
     try:
         inventory_item_id_int = int(inventory_item_id)
     except Exception:
-        # If caller passed a string gid number, do a best-effort cast
         inventory_item_id_int = int(str(inventory_item_id).split("/")[-1])
     return {
         "available": int(available),
