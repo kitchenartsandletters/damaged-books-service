@@ -6,38 +6,25 @@ from services import redirect_service
 import re
 from typing import Optional
 
-async def update_used_book_canonicals(product, new_book_handle):
+async def update_used_book_canonicals(product, canonical_handle):
     """
-    Determines the canonical handle for a damaged book product by resolving it and writing to metafield.
-    Returns a dict with resolution method, canonical_handle, product_id, and written status.
+    Writes the provided canonical handle to the Shopify metafield for the given product.
+    Returns a dict with canonical_handle, product_id, and written status.
     """
     product_id = product['id']
-    handle = new_book_handle.strip()
-    logging.info(f"Updating canonical tags for product {product_id} with damaged handle '{handle}'")
-
+    logging.info(f"Writing canonical handle '{canonical_handle}' to metafield for product {product_id}")
+    written = False
     try:
-        canonical_handle = await resolve_canonical_handle(handle, product)
-        written = False
-        try:
-            await shopify_client.set_product_metafield(product_id, namespace='custom', key='canonical_handle', value=canonical_handle)
-            written = True
-            logging.info(f"Written canonical handle '{canonical_handle}' to metafield for product {product_id}")
-        except Exception as e:
-            logging.warning(f"Error writing canonical handle metafield for product {product_id}: {e}")
-        return {
-            "resolution": "resolved",
-            "canonical_handle": canonical_handle,
-            "product_id": product_id,
-            "written": written
-        }
+        await shopify_client.set_product_metafield(product_id, canonical_handle)
+        written = True
+        logging.info(f"Written canonical handle '{canonical_handle}' to metafield for product {product_id}")
     except Exception as e:
-        logging.warning(f"Failed to resolve and write canonical handle for product {product_id} with handle '{handle}': {e}")
-        return {
-            "resolution": "failed",
-            "canonical_handle": None,
-            "product_id": product_id,
-            "written": False
-        }
+        logging.warning(f"Error writing canonical handle metafield for product {product_id}: {e}")
+    return {
+        "canonical_handle": canonical_handle,
+        "product_id": product_id,
+        "written": written
+    }
 
 async def resolve_canonical_handle(damaged_handle: str, product: dict | None = None) -> str:
     """
