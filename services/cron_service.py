@@ -56,14 +56,19 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
                          .get("inventoryLevel", {})
                          .get("available", 0))
 
+            condition = r.get("condition")
+            condition_raw = r.get("condition_raw")
+            condition_key = r.get("condition_key")
+            logger.info(f"Upserting inventory item {inv_id} with condition={condition}, condition_raw={condition_raw}, condition_key={condition_key}")
+
             damaged_inventory_repo.upsert(
                 inventory_item_id=inv_id,
                 product_id=product_id,
                 variant_id=int(r["variant_id"]),
                 handle=handle,
-                condition=r.get("condition_key"),        # still map existing condition column
-                condition_raw=r.get("condition_raw"),# new explicit field
-                condition_key=r.get("condition_key"),# new explicit field
+                condition=condition,
+                condition_raw=condition_raw,
+                condition_key=condition_key,
                 available=int(available or 0),
                 source="reconcile",
                 title=r.get("title"),
