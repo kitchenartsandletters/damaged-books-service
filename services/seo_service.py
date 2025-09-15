@@ -34,8 +34,9 @@ async def resolve_canonical_handle(damaged_handle: str, product: dict | None = N
     Resolution order:
       1. Strip '-damaged' from handle.
       2. Check redirect service.
-      3. Check Shopify product existence via GraphQL.
-      4. Fallback to stripped handle.
+      3. If no redirect and product object provided, trust stripped handle.
+      4. If no product object, check Shopify product existence via GraphQL.
+      5. Fallback to stripped handle.
     Returns the canonical handle string.
     """
     logger = logging.getLogger("seo_service")
@@ -67,32 +68,29 @@ async def resolve_canonical_handle(damaged_handle: str, product: dict | None = N
     except Exception as e:
         logger.warning(f"Error checking redirect for handle '{stripped}': {e}")
 
-    # If the caller provided the product (damaged product), avoid extra network calls;
-    # trust the stripped handle as the canonical candidate.
+    # 3. If product object provided, trust stripped handle without further network calls
     if product is not None:
-        logger.info("Product object provided; skipping GraphQL existence check and trusting stripped handle.")
+        logger.info("Product object provided; trusting stripped handle without further checks.")
         return stripped
-    
-    # 3. (Fallback) If no product object was provided, optionally confirm existence via GraphQL
-    if product is None:
-        try:
-            query = """
-            query productByHandle($handle: String!) {
-              productByHandle(handle: $handle) { id handle title }
-            }
-            """
-            variables = {"handle": stripped}
-            response = await shopify_client.graphql(query, variables)
-            product_data = response.get("data", {}).get("productByHandle")
-            if product_data:
-                logger.info(f"Canonical handle resolved via Shopify product (GraphQL): '{stripped}'")
-                return stripped
-            else:
-                logger.info(f"No Shopify product found for handle '{stripped}' via GraphQL")
-        except Exception as e:
-            logger.warning(f"Error fetching Shopify product for handle '{stripped}' via GraphQL: {e}")
 
+    # 4. If no product object, confirm existence via GraphQL
+    try:
+        query = """
+        query productByHandle($handle: String!) {
+          productByHandle(handle: $handle) { id handle title }
+        }
+        """
+        variables = {"handle": stripped}
+        response = await shopify_client.graphql(query, variables)
+        product_data = response.get("data", {}).get("productByHandle")
+        if product_data:
+            logger.info(f"Canonical handle resolved via Shopify product (GraphQL): '{stripped}'")
+            return stripped
+        else:
+            logger.info(f"No Shopify product found for handle '{stripped}' via GraphQL")
+    except Exception as e:
+        logger.warning(f"Error fetching Shopify product for handle '{stripped}' via GraphQL: {e}")
 
-    # 4. Fallback to stripped
+    # 5. Fallback to stripped
     logger.info(f"Falling back to stripped handle: '{stripped}'")
     return stripped
