@@ -54,7 +54,11 @@ async def apply_product_rules_with_product(product_id: str, damaged_handle: str,
                 else:
                     logger.info(f"[Redirect] Created id={created.get('id')} from {damaged_handle} → {canonical_handle}")
 
-        # Canonical tag update now handled only in process_inventory_change
+        # Update canonical metafield once per product
+        canonical_set = await seo_service.update_used_book_canonicals(
+            await product_service.get_product_by_id(product_id),
+            canonical_handle
+        )
     except Exception as e:
         logger.warning(f"[UsedBookManager] apply_product_rules_with_product error: {e}")
 
@@ -88,9 +92,6 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
 
         # Canonical target
         canonical_handle = await seo_service.resolve_canonical_handle(damaged_handle=handle, product=product)
-
-        # Always set canonicals toward the new book page
-        canonical_set = await seo_service.update_used_book_canonicals(product, canonical_handle)
 
         # Removed inline publish/unpublish and redirect logic per instructions
 
@@ -155,7 +156,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             barcode=(str(variant_data.get("barcode")) if variant_data else None),
         )
 
-        # Apply product-level rules once per product (handle publish/unpublish and redirects)
+        # Apply product-level rules once per product (handle publish/unpublish, redirects, and canonical metafield)
         await apply_product_rules_with_product(product_id, handle, canonical_handle)
 
         return {
@@ -163,7 +164,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             "handle": handle,
             "inStock": is_in_stock,
             "action": "published" if is_in_stock else "unpublished",
-            "canonicalSet": bool(canonical_set),
+            "canonicalSet": True,  # since update_used_book_canonicals is called in apply_product_rules_with_product
         }
 
     except Exception as e:
