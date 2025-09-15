@@ -68,7 +68,7 @@ async def handle_inventory_webhook(request: Request):
     available_hint = data.get("available")
 
     try:
-        # 🔎 Query and defensively filter
+        # 🔎 Query once via REST
         variants_raw = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
         variants_exact = [
             v for v in (variants_raw or [])
@@ -81,7 +81,13 @@ async def handle_inventory_webhook(request: Request):
             f"for inventory_item_id={inventory_item_id}"
         )
 
-        if not variants_exact:
+        variant_id = None
+        product_id = None
+
+        if variants_exact:
+            variant_id = str(variants_exact[0]["id"])
+            product_id = str(variants_exact[0]["product_id"])
+        else:
             # 🔁 Fallback to GraphQL if REST didn't return an exact match
             gql = await shopify_client.get_variant_product_by_inventory_item(inventory_item_id)
             if not gql:
@@ -92,18 +98,16 @@ async def handle_inventory_webhook(request: Request):
                         "reason": f"no variant found for inventory_item_id={inventory_item_id} (REST+GQL)"
                     }
                 )
-
             variant_id = str(gql["variant_id"])
             product_id = str(gql["product_id"])
-            available_hint = data.get("available")
 
-            result = await used_book_manager.process_inventory_change(
-                inventory_item_id=str(inventory_item_id),
-                variant_id=variant_id,
-                product_id=product_id,
-                available_hint=available_hint,
-            )
-            return JSONResponse(status_code=200, content={"status": "success", "result": result})
+        result = await used_book_manager.process_inventory_change(
+            inventory_item_id=str(inventory_item_id),
+            variant_id=variant_id,
+            product_id=product_id,
+            available_hint=available_hint,
+        )
+        return JSONResponse(status_code=200, content={"status": "success", "result": result})
 
     except Exception as e:
         logger.error(f"Error processing inventory update: {str(e)}")
