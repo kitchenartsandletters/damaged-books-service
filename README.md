@@ -9,32 +9,49 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 ### Modern Flow
 1. **Webhook ingestion:** Shopify emits `inventory_levels/update` → Gateway receives, verifies Shopify HMAC, and forwards the raw POST (body + headers) to DBS `/webhooks/inventory-levels`.
 2. **HMAC verification:** DBS verifies the Shopify HMAC signature (defense-in-depth).
-3. **Variant & product resolution:** 
-    - First, REST `/admin/variants.json?inventory_item_ids=...` (with post-filtering for exact `inventory_item_id`).
-    - Always falls back to GraphQL if REST is ambiguous or empty, to reliably map `inventory_item_id` to `variant_id`, `product_id`, and handle.
-4. **Condition extraction and persistence:** 
-    - DBS queries Shopify GraphQL for the variant’s `selectedOptions` (esp. `Condition`) to determine if this is a damaged book and which condition (Light, Moderate, Heavy).
-    - Both `condition_raw` (human-readable from Shopify, e.g. "Light Damage") and `condition_key` (snake-cased normalized value, e.g. "light_damage") are extracted and stored.
-    - The Supabase function `damaged.damaged_upsert_inventory(...)` expects both values, and DBS ensures they are preserved across webhook, replay, and reconcile flows.
-    - No longer uses handle regex for detection.
-5. **Persistence:** 
-    - DBS calls Supabase function `damaged.damaged_upsert_inventory(...)` to upsert the normalized row in `damaged.inventory`.
-    - View `damaged.inventory_view` is used for queries; `damaged.changelog` is available for auditing.
-6. **Business rules:** 
-    - If the variant is a damaged book, DBS checks stock (via inventory_service), publishes/unpublishes (product_service), sets canonical (seo_service), and manages redirects (redirect_service).
-    - All rules are idempotent and run only for recognized damaged variants.
-7. **Response:** 
-    - Always returns 200 for app errors (to avoid Shopify retries), 401 only for HMAC signature failures.
+3. **Variant & product resolution (GraphQL‑first):**
+   - Use `shopify_client.get_variant_product_by_inventory_item(inventory_item_id)` to map the inventory item to `variant_id`, `product_id`, and `handle` in a single GraphQL call.
+   - If (and only if) GraphQL returns no match, fall back to REST `GET /admin/variants.json?inventory_item_ids=...` (post‑filtered for exact `inventory_item_id`).
+   - This logic is centralized in `shopify_client.resolve_inventory_item(...)` and consumed by the route layer.
+4. **Product hydration (GraphQL):**
+   - Fetch the product once via `shopify_client.get_product_by_id_gql(product_id)` and pass it through to the manager. The manager **trusts the passed product** and does not re-fetch it.
+5. **Canonical resolution & write (once per event):**
+   - `seo_service.resolve_canonical_handle(damaged_handle, product)` resolves the canonical destination (strip `-damaged`, honor redirects if present, otherwise trust the stripped handle).
+   - `seo_service.update_used_book_canonicals(product, canonical_handle)` writes `metafields.custom.canonical_handle` exactly once per webhook event.
+6. **Condition extraction & persistence:**
+   - Query Shopify GraphQL variant `selectedOptions` to extract `Condition` (Light/Moderate/Heavy).
+   - Preserve both `condition_raw` (human value) and `condition_key` (normalized snake_case) and upsert via Supabase RPC `damaged_upsert_inventory`.
+7. **Business rules (idempotent):**
+   - **Publish/unpublish** damaged product via GraphQL `productUpdate` using `shopify_client.set_product_publish_status(product_id, publish=True|False)`.
+   - **Redirects:** If **ANY** variant in stock → publish and **remove** redirect if present. If **ALL** variants out of stock → unpublish and **ensure** redirect exists from damaged handle to canonical handle. Aggregate availability comes from `damaged.inventory_view`.
+8. **Response:** Always returns HTTP 200 on internal errors (to avoid Shopify retries), 401 only for HMAC failures.
+
+---
+
+## Architecture Updates
+
+- **GraphQL‑first resolution:** Inventory item → (variant_id, product_id, handle) is now resolved via GraphQL first, with REST as a rare fallback. Centralized in `shopify_client.resolve_inventory_item`.
+- **Single product hydration:** The route hydrates product via GraphQL and passes it forward. `used_book_manager` trusts the object and does not re‑fetch.
+- **Single canonical write:** `seo_service` resolves the canonical once and writes `custom.canonical_handle` exactly once per event.
+- **Unified publish/unpublish:** Moved from `product_service` to `shopify_client.set_product_publish_status` (GraphQL `productUpdate`).
+- **Redirects rule clarified:** Only create redirect when **all** damaged variants are out of stock; remove it when **any** variant returns to stock.
+- **Removed duplication:** Eliminated duplicate `variants.json` calls and duplicated canonical writes.
+- **Deprecation:** `api/webhooks.py` inventory route removed; `/webhooks/inventory-levels` lives in `routes.py`.
 
 ---
 
 ## Key Services and Responsibilities
 
-- **inventory_service:** Checks real-time stock via Shopify GraphQL (`inventoryLevel(inventoryItemId, locationId)`), used for all availability logic. The reconcile pipeline now calls `resolve_by_inventory_item_id` from this service to fetch both availability and condition info, preserving both fields and falling back to existing DB values if Shopify omits data.
-- **used_book_manager:** Orchestrates the main flow: receives inventory updates, resolves variant/product, extracts condition, persists to Supabase, and triggers business rules.
-- **product_service:** Publishes or unpublishes the damaged book product on Shopify as needed.
-- **seo_service:** Updates SEO canonical links so damaged book pages canonicalize to the new/primary product.
-- **redirect_service:** Creates or removes redirects from damaged book URLs to the canonical product.
+- **shopify_client:** Centralized Shopify Admin API access (GraphQL‑first). Provides:
+  - `get_variant_product_by_inventory_item(inventory_item_id)`
+  - `get_product_by_id_gql(product_id)`
+  - `set_product_publish_status(product_id, publish: bool)`
+  - `resolve_inventory_item(inventory_item_id)` — unified helper that uses GraphQL first with REST fallback.
+- **inventory_service:** Uses Shopify GraphQL to check stock and map `selectedOptions` (Condition). Reconcile also calls through GraphQL.
+- **used_book_manager:** Orchestrates the flow. **Trusts the hydrated product passed in** (no additional product GETs), extracts condition, upserts to Supabase, runs publish/unpublish + redirect rules, and triggers canonical write exactly once per event.
+- **seo_service:** Resolves canonical handle (strip `-damaged`, check redirect, else trust stripped handle) and writes `metafields.custom.canonical_handle` one time per webhook event.
+- **redirect_service:** Finds, creates, and deletes redirects between damaged and canonical handles.
+- **product_service:** **Deprecated**. All publish/unpublish is handled by `shopify_client.set_product_publish_status(...)`.
 
 ---
 
@@ -51,11 +68,9 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 
 ## Damaged-Book Detection (Current)
 
-- **Detection is based on Shopify variant options:**
-    - The variant must have a `Condition` option with value `Light`, `Moderate`, or `Heavy`.
-    - Both the human-readable condition (`condition_raw`) and a snake-cased normalized key (`condition_key`) are extracted via Shopify GraphQL (`selectedOptions`), not by handle regex.
-- **Handles and tags are not used for detection.**
-- **If the variant is not a damaged book, the event is skipped.**
+- **Primary classification:** Product **handle** ending with `-damaged` marks the item as a damaged/used product.
+- **Condition reporting:** Variant `selectedOptions` (via GraphQL) are still read to extract the human value (`condition_raw`, e.g., "Light Damage") and a normalized key (`condition_key`, e.g., "light_damage") for analytics and display.
+- **Notes:** This approach ensures fast, unambiguous classification without relying on tags. We may consider an options‑only detection in the future, but the handle suffix has proven reliable with our catalog structure.
 
 ---
 
@@ -63,6 +78,7 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 
 - `GET /health` — Health check. Returns `{"status":"ok"}`
 - `POST /webhooks/inventory-levels` — Main webhook endpoint. Expects Shopify HMAC, original body, and headers (via Gateway).
+  - Implemented in `routes.py` (the legacy `api/webhooks.py` route has been removed).
 - **Admin endpoints (require `X-Admin-Token`):**
     - `GET /admin/docs` — Link hub for admin tools.
     - `GET /admin/damaged-inventory` — List current damaged inventory (header: `X-Result-Count`).
@@ -172,13 +188,11 @@ curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
 
 - **HMAC verification:**  
   - Always use the Shopify webhook secret (`SHOPIFY_API_SECRET`) for HMAC. The Gateway must forward the original bytes and `X-Shopify-Hmac-Sha256`.
-- **Variant/product resolution:**  
-  - REST `variants.json` is post-filtered; always falls back to GraphQL for accuracy.
+- **Variant/product resolution:** GraphQL‑first using `shopify_client.resolve_inventory_item(...)` (REST fallback only if GraphQL yields no match). This removed duplicate REST calls and simplified the route.
 - **Condition extraction:**  
   - Only variants with a `Condition` option of `Light`, `Moderate`, or `Heavy` are considered damaged.
   - Both `condition_raw` (human-readable) and `condition_key` (snake-cased normalized) are extracted and persisted.
-- **Business rules:**  
-  - Logic for publish/unpublish, canonical, and redirect is idempotent and only applies to damaged variants.
+- **Business rules:** Publish/unpublish via GraphQL `productUpdate` using `shopify_client.set_product_publish_status(...)`. Canonical is resolved/written **once** per event in `seo_service`. Redirect creation/removal follows the aggregate stock rule (ALL OOS → create; ANY in stock → remove).
 - **Persistence:**  
   - All events upsert to `damaged.inventory` via Supabase RPC, preserving both condition fields.
 - **Replay & reconcile:**  
@@ -189,24 +203,9 @@ curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
 
 ---
 
-## Troubleshooting
+## Future Optimizations
 
-- **502 “Application failed to respond” (Railway):**  
-  - Ensure service binds to `0.0.0.0:$PORT` and Public Networking is enabled.
-- **401 “Invalid HMAC signature”:**  
-  - Confirm the secret and that the body is the exact raw bytes from Shopify (no re-stringify).
-- **400 “Missing HMAC header”:**  
-  - Gateway must forward `X-Shopify-Hmac-Sha256`.
-- **REST variant API returns unrelated/empty:**  
-  - Service will fall back to GraphQL; check logs for fallback.
-- **“Product is not a damaged book, skipping”:**  
-  - Variant did not have a `Condition` option of `Light`, `Moderate`, or `Heavy`.
-- **Replay HMAC mismatch:**  
-  - Ensure Gateway forwards the raw Buffer, not a re-serialized body.
-- **Duplicate deliveries:**  
-  - DBS expects idempotency if `X-Gateway-Event-ID` is present.
-- **Reconcile appears to nullify condition or reset availability:**  
-  - Check logs for resolver results. This is expected behavior if Shopify omits data; DBS preserves existing DB values unless Shopify explicitly reports them.
+- **Per-event redirect lookup cache:** Propose a patch to cache `redirect_service.find_redirect_by_path(handle)` results within a single webhook processing pass (per-handle memoization) so we don’t hit `/redirects.json` twice for the same handle (e.g., `test-book-title`). This is a low-risk latency and rate-limit optimization.
 
 ---
 
@@ -256,7 +255,7 @@ In theme.liquid (or your head partial), replace the canonical tag with:
   <link rel="canonical" href="{{ canonical_url }}">
 {% endif %}
 
-	•	This matches Shopify’s guidance to include a canonical tag and relies on canonical_url as the safe fallback.  ￼
+Our app writes `custom.canonical_handle` exactly once per event so the theme only evaluates it and does not need to manage timing or retries.
 
 	3.	Why this is SEO-correct:
 Google’s guidance is to use one canonical URL for duplicate/near-duplicate content. By always canonicalizing damaged SKUs to the undamaged primary page, you consolidate signals and avoid needless indexing of transient damaged pages.  ￼
