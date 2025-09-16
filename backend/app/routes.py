@@ -12,8 +12,6 @@ from pydantic import BaseModel
 import logging
 from config import get_settings
 from services.shopify_client import shopify_client
-from services import product_service
-from services.product_service import get_product_by_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -105,7 +103,7 @@ async def handle_inventory_webhook(request: Request):
                     }
                 )
 
-        product = await product_service.get_product_by_id(product_id)
+        product = await shopify_client.get_product_by_id_gql(product_id)
         result = await used_book_manager.process_inventory_change(
             inventory_item_id=str(inventory_item_id),
             variant_id=variant_id,
@@ -122,7 +120,7 @@ async def handle_inventory_webhook(request: Request):
 @router.post("/api/products/check")
 async def check_product(req: ProductCheckRequest):
     try:
-        product = await product_service.get_product_by_id(req.product_id)
+        product = await shopify_client.get_product_by_id_gql(req.product_id)
         result = await used_book_manager.process_inventory_change(
             inventory_item_id=req.inventory_item_id,
             variant_id=req.variant_id,

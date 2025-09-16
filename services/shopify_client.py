@@ -288,5 +288,40 @@ class ShopifyClient:
         except Exception as e:
             logger.error(f"[ShopifyClient] Exception setting metafield: {e}")
             return None
+        
+    
+    async def get_product_by_id_gql(product_gid: str) -> dict:
+        """
+        Fetch a Shopify product object by its GraphQL ID.
+        Example product_gid: "gid://shopify/Product/1234567890"
+        """
+        query = """
+        query getProduct($id: ID!) {
+        product(id: $id) {
+            id
+            handle
+            title
+            variants(first: 50) {
+            edges {
+                node {
+                id
+                sku
+                barcode
+                selectedOptions {
+                    name
+                    value
+                }
+                inventoryItem {
+                    id
+                }
+                }
+            }
+            }
+        }
+        }
+        """
+        variables = {"id": product_gid}
+        resp = await shopify_client.graphql(query, variables)
+        return resp.get("data", {}).get("product", {})
 
 shopify_client = ShopifyClient()

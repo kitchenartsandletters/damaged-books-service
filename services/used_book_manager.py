@@ -1,8 +1,9 @@
 # services/used_book_manager.py
 
 import logging
-from services import product_service, redirect_service, seo_service, inventory_service
+from services import redirect_service, seo_service, inventory_service
 from services import notification_service
+from services import shopify_client
 import os
 from typing import Optional
 from services.inventory_service import resolve_by_inventory_item_id
@@ -82,11 +83,6 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
 
         # Canonical target
         canonical_handle = await seo_service.resolve_canonical_handle(damaged_handle=handle, product=product)
-
-        # Update canonical metafield once per product
-        await seo_service.update_used_book_canonicals(product, canonical_handle)
-
-        # Removed inline publish/unpublish and redirect logic per instructions
 
         # Resolve variant + product + condition via Admin GraphQL using inventory_item_id
         condition_raw = None
@@ -179,7 +175,7 @@ async def scan_all_used_books():
     ]
 
     for entry in dummy_products:
-        product = await product_service.get_product_by_id(entry["product_id"])
+        product = await shopify_client.get_product_by_id_gql(entry["product_id"])
         await process_inventory_change(
             inventory_item_id=entry["inventory_item_id"],
             variant_id=entry["variant_id"],

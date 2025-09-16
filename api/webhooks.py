@@ -4,7 +4,6 @@ from fastapi import APIRouter, Request, Header
 from fastapi.responses import JSONResponse
 from services.shopify_client import shopify_client
 from services.used_book_manager import process_inventory_change
-from services import product_service
 import logging
 import json
 import os
@@ -46,7 +45,7 @@ async def handle_inventory_level_update(
         product_id = variant_info.get("product_id")
         variant_id = variant_info.get("variant_id")
 
-        product = await product_service.get_product_by_id(product_id)
+        product = await shopify_client.get_product_by_id_gql(product_id)
         await process_inventory_change(
             inventory_item_id=inventory_item_id,
             variant_id=variant_id,
