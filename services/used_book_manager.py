@@ -3,7 +3,7 @@
 import logging
 from services import redirect_service, seo_service, inventory_service
 from services import notification_service
-from services import shopify_client
+from services.shopify_client import shopify_client
 import os
 from typing import Optional
 from services.inventory_service import resolve_by_inventory_item_id
