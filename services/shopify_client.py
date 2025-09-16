@@ -290,7 +290,7 @@ class ShopifyClient:
             return None
         
     
-    async def get_product_by_id_gql(product_gid: str) -> dict:
+    async def get_product_by_id_gql(self, product_gid: str) -> dict:
         """
         Fetch a Shopify product object by its GraphQL ID.
         Example product_gid: "gid://shopify/Product/1234567890"
@@ -321,7 +321,7 @@ class ShopifyClient:
         }
         """
         variables = {"id": product_gid}
-        resp = await shopify_client.graphql(query, variables)
+        resp = await self.graphql(query, variables)
         return resp.get("data", {}).get("product", {})
 
 shopify_client = ShopifyClient()
