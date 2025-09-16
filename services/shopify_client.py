@@ -380,5 +380,40 @@ class ShopifyClient:
             "title": title,
             "variants": variants,
         }
+    
+    async def set_product_publish_status(self, product_id: str, publish: bool) -> Optional[dict]:
+        """
+        Sets the publish status of a product using the productUpdate GraphQL mutation.
+        Sets status to "ACTIVE" if publish is True, else "ARCHIVED".
+        Returns the result dict, or None if error.
+        """
+        mutation = """
+        mutation productUpdate($input: ProductInput!) {
+            productUpdate(input: $input) {
+            product {
+                id
+                status
+            }
+            userErrors {
+                field
+                message
+            }
+            }
+        }
+        """
+        status_value = "ACTIVE" if publish else "ARCHIVED"
+        variables = {
+            "input": {
+                "id": f"gid://shopify/Product/{product_id}",
+                "status": status_value
+            }
+        }
+        try:
+            result = await self.graphql(mutation, variables)
+            logger.info(f"[ShopifyClient] set_product_publish_status: product_id={product_id} publish={publish} result={result}")
+            return result
+        except Exception as e:
+            logger.error(f"[ShopifyClient] Error setting publish status for product_id={product_id}: {e}")
+            return None
 
 shopify_client = ShopifyClient()
