@@ -24,3 +24,8 @@ build/
 # Railway + Local
 railway.json
 *.sqlite3
+
+# Testing
+tests/
+tests/cleanup_seeded_products.py
+tests/dbs_pytest.py
