@@ -415,5 +415,37 @@ class ShopifyClient:
         except Exception as e:
             logger.error(f"[ShopifyClient] Error setting publish status for product_id={product_id}: {e}")
             return None
+        
+    async def resolve_inventory_item(self, inventory_item_id: int | str) -> dict | None:
+        """
+        Resolve a Shopify inventory_item_id to its variant_id, product_id, and hydrated product dict.
+        Tries GraphQL first, then falls back to REST.
+        Returns dict with keys: "variant_id", "product_id", "product", or None if not found.
+        """
+        # Try GraphQL first
+        gql_result = await self.get_variant_product_by_inventory_item(inventory_item_id)
+        if gql_result and gql_result.get("variant_id") and gql_result.get("product_id"):
+            product = await self.get_product_by_id_gql(gql_result["product_id"])
+            return {
+                "variant_id": gql_result["variant_id"],
+                "product_id": gql_result["product_id"],
+                "product": product
+            }
+
+        # Fallback: REST
+        variants = await self.get_variants_by_inventory_item_id(inventory_item_id)
+        if variants:
+            variant = variants[0]
+            variant_id = str(variant.get("id"))
+            product_id = str(variant.get("product_id"))
+            product = await self.get_product_by_id_gql(product_id)
+            return {
+                "variant_id": variant_id,
+                "product_id": product_id,
+                "product": product
+            }
+
+        # Not found
+        return None
 
 shopify_client = ShopifyClient()

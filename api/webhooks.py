@@ -39,15 +39,14 @@ async def handle_inventory_level_update(
 
         logger.info(f"Processing inventory change for inventory_item_id={inventory_item_id}")
         
-        variant_info = await shopify_client.get_variant_product_by_inventory_item(inventory_item_id)
-        product_id = variant_info.get("product_id")
-        variant_id = variant_info.get("variant_id")
+        resolved = await shopify_client.resolve_inventory_item(inventory_item_id)
+        if not resolved:
+            return JSONResponse(content={"status": "no-op", "reason": f"no variant/product found for inventory_item_id={inventory_item_id}"})
 
-        product = await shopify_client.get_product_by_id_gql(product_id)
         await process_inventory_change(
             inventory_item_id=inventory_item_id,
-            variant_id=variant_id,
-            product=product,
+            variant_id=resolved["variant_id"],
+            product=resolved["product"],
         )
 
         return JSONResponse(content={"status": "ok"})
