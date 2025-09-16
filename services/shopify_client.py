@@ -289,39 +289,96 @@ class ShopifyClient:
             logger.error(f"[ShopifyClient] Exception setting metafield: {e}")
             return None
         
-    
-    async def get_product_by_id_gql(self, product_gid: str) -> dict:
+    async def get_product_by_id_gql(self, product_id_or_gid: str | int) -> dict:
         """
-        Fetch a Shopify product object by its GraphQL ID.
-        Example product_gid: "gid://shopify/Product/1234567890"
+        Fetch a Shopify product object by its GraphQL ID or numeric ID.
+        Accepts either a numeric product ID or a gid string.
+        Returns a normalized dict with keys: id (numeric), gid, handle, title, variants (list of dicts).
         """
+        # Accept either numeric id or gid string
+        if isinstance(product_id_or_gid, int) or (isinstance(product_id_or_gid, str) and product_id_or_gid.isdigit()):
+            numeric_id = str(product_id_or_gid)
+            product_gid = f"gid://shopify/Product/{numeric_id}"
+        else:
+            product_gid = str(product_id_or_gid)
+            # try to extract numeric id for output
+            parts = product_gid.rsplit("/", 1)
+            numeric_id = parts[-1] if len(parts) == 2 and parts[-1].isdigit() else None
+
         query = """
         query getProduct($id: ID!) {
-        product(id: $id) {
+          product(id: $id) {
             id
             handle
             title
             variants(first: 50) {
-            edges {
+              edges {
                 node {
-                id
-                sku
-                barcode
-                selectedOptions {
+                  id
+                  sku
+                  barcode
+                  selectedOptions {
                     name
                     value
-                }
-                inventoryItem {
+                  }
+                  inventoryItem {
                     id
+                  }
                 }
-                }
+              }
             }
-            }
-        }
+          }
         }
         """
         variables = {"id": product_gid}
         resp = await self.graphql(query, variables)
-        return resp.get("data", {}).get("product", {})
+        prod = resp.get("data", {}).get("product", {})
+        if not prod:
+            return {}
+
+        # Normalize id and gid
+        gid = prod.get("id", product_gid)
+        try:
+            id_num = int(gid.rsplit("/", 1)[-1])
+        except Exception:
+            id_num = None
+        handle = prod.get("handle")
+        title = prod.get("title")
+
+        variants = []
+        for edge in (prod.get("variants", {}).get("edges") or []):
+            node = edge.get("node", {})
+            v_gid = node.get("id")
+            try:
+                v_id = int(v_gid.rsplit("/", 1)[-1])
+            except Exception:
+                v_id = None
+            sku = node.get("sku")
+            barcode = node.get("barcode")
+            selected_options = [
+                {"name": so.get("name"), "value": so.get("value")}
+                for so in (node.get("selectedOptions") or [])
+            ]
+            inv_item_gid = (node.get("inventoryItem") or {}).get("id")
+            try:
+                inventory_item_id = int(inv_item_gid.rsplit("/", 1)[-1]) if inv_item_gid else None
+            except Exception:
+                inventory_item_id = None
+            variants.append({
+                "id": v_id,
+                "gid": v_gid,
+                "sku": sku,
+                "barcode": barcode,
+                "selected_options": selected_options,
+                "inventory_item_id": inventory_item_id,
+            })
+
+        return {
+            "id": id_num,
+            "gid": gid,
+            "handle": handle,
+            "title": title,
+            "variants": variants,
+        }
 
 shopify_client = ShopifyClient()
