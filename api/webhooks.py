@@ -37,11 +37,9 @@ async def handle_inventory_level_update(
             logger.error("No inventory_item_id in webhook payload")
             return JSONResponse(content={"error": "Missing inventory_item_id"}, status_code=400)
 
-        # Let the manager resolve variant/product/condition via Admin GraphQL
         logger.info(f"Processing inventory change for inventory_item_id={inventory_item_id}")
         
-        # First resolve product_id + variant_id from inventory_item_id via GraphQL
-        variant_info = await shopify_client.get_variant_by_inventory_item_id(inventory_item_id)
+        variant_info = await shopify_client.get_variant_product_by_inventory_item(inventory_item_id)
         product_id = variant_info.get("product_id")
         variant_id = variant_info.get("variant_id")
 

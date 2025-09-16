@@ -175,7 +175,13 @@ async def scan_all_used_books():
     ]
 
     for entry in dummy_products:
-        product = await shopify_client.get_product_by_id_gql(entry["product_id"])
+        # Instead of fetching product via shopify_client.get_product_by_id_gql,
+        # simulate a hydrated product dict with required fields
+        product = {
+            "id": entry["product_id"],
+            "handle": "example-damaged",
+            "title": "Example Damaged Book Title"
+        }
         await process_inventory_change(
             inventory_item_id=entry["inventory_item_id"],
             variant_id=entry["variant_id"],
