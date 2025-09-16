@@ -179,10 +179,11 @@ async def scan_all_used_books():
     ]
 
     for entry in dummy_products:
+        product = await product_service.get_product_by_id(entry["product_id"])
         await process_inventory_change(
             inventory_item_id=entry["inventory_item_id"],
             variant_id=entry["variant_id"],
-            product=entry.get("product", {}),  # Note: this might need actual product dict in real usage
+            product=product,
         )
 
     logging.info("Used book inventory scan completed.")

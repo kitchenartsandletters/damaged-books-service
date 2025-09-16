@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request, Header
 from fastapi.responses import JSONResponse
 from services.shopify_client import shopify_client
 from services.used_book_manager import process_inventory_change
+from services import product_service
 import logging
 import json
 import os
@@ -39,7 +40,18 @@ async def handle_inventory_level_update(
 
         # Let the manager resolve variant/product/condition via Admin GraphQL
         logger.info(f"Processing inventory change for inventory_item_id={inventory_item_id}")
-        await process_inventory_change(inventory_item_id, 0, 0)
+        
+        # First resolve product_id + variant_id from inventory_item_id via GraphQL
+        variant_info = await shopify_client.get_variant_by_inventory_item_id(inventory_item_id)
+        product_id = variant_info.get("product_id")
+        variant_id = variant_info.get("variant_id")
+
+        product = await product_service.get_product_by_id(product_id)
+        await process_inventory_change(
+            inventory_item_id=inventory_item_id,
+            variant_id=variant_id,
+            product=product,
+        )
 
         return JSONResponse(content={"status": "ok"})
 
