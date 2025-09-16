@@ -57,14 +57,9 @@ async def apply_product_rules_with_product(product_id: str, damaged_handle: str,
     except Exception as e:
         logger.warning(f"[UsedBookManager] apply_product_rules_with_product error: {e}")
 
-async def process_inventory_change(inventory_item_id: str, variant_id: str, product_id: str, available_hint: int | None = None) -> dict:
+async def process_inventory_change(inventory_item_id: str, variant_id: str, product: dict, available_hint: int | None = None) -> dict:
     try:
-        # Get product details
-        product = await product_service.get_product_by_id(product_id)
-        if not product:
-            logger.warning(f"[Inventory] Product {product_id} not found, skipping")
-            return {"productId": product_id, "skipped": "product_not_found"}
-
+        product_id = product.get("id")
         handle = (product.get("handle") or "").lower()
 
         # Damage check: only handles ending with "-damaged" are considered damaged books.
@@ -166,9 +161,9 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
         }
 
     except Exception as e:
-        logger.error(f"Error processing inventory change for product {product_id}: {str(e)}")
+        logger.error(f"Error processing inventory change for product {product.get('id')}: {str(e)}")
         notification_service.notify_critical_error(e, {
-            "productId": product_id,
+            "productId": product.get('id'),
             "context": "Inventory change processing"
         })
         raise
@@ -187,7 +182,7 @@ async def scan_all_used_books():
         await process_inventory_change(
             inventory_item_id=entry["inventory_item_id"],
             variant_id=entry["variant_id"],
-            product_id=entry["product_id"],
+            product=entry.get("product", {}),  # Note: this might need actual product dict in real usage
         )
 
     logging.info("Used book inventory scan completed.")

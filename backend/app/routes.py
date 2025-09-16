@@ -68,38 +68,40 @@ async def handle_inventory_webhook(request: Request):
     available_hint = data.get("available")
 
     try:
-        # 🔎 Query once via REST
-        variants_raw = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
-        variants_exact = [
-            v for v in (variants_raw or [])
-            if str(v.get("inventory_item_id")) == str(inventory_item_id)
-        ]
-
-        logger.info(
-            f"[Inventory Lookup] reported_count={len(variants_raw or [])} "
-            f"exact_match_count={len(variants_exact)} "
-            f"for inventory_item_id={inventory_item_id}"
-        )
-
+        # 🔎 Prefer GraphQL; fallback to REST (avoid duplicate REST calls)
         variant_id = None
         product_id = None
 
-        if variants_exact:
-            variant_id = str(variants_exact[0]["id"])
-            product_id = str(variants_exact[0]["product_id"])
+        # First try Admin GraphQL (stable going forward)
+        gql = await shopify_client.get_variant_product_by_inventory_item(inventory_item_id)
+        if gql:
+            variant_id = str(gql["variant_id"])
+            product_id = str(gql["product_id"])
         else:
-            # 🔁 Fallback to GraphQL if REST didn't return an exact match
-            gql = await shopify_client.get_variant_product_by_inventory_item(inventory_item_id)
-            if not gql:
+            # REST fallback only if GraphQL couldn't resolve
+            variants_raw = await shopify_client.get_variants_by_inventory_item_id(inventory_item_id)
+            variants_exact = [
+                v for v in (variants_raw or [])
+                if str(v.get("inventory_item_id")) == str(inventory_item_id)
+            ]
+
+            logger.info(
+                f"[Inventory Lookup:REST Fallback] reported_count={len(variants_raw or [])} "
+                f"exact_match_count={len(variants_exact)} "
+                f"for inventory_item_id={inventory_item_id}"
+            )
+
+            if variants_exact:
+                variant_id = str(variants_exact[0]["id"])
+                product_id = str(variants_exact[0]["product_id"])
+            else:
                 return JSONResponse(
                     status_code=200,
                     content={
                         "status": "no-op",
-                        "reason": f"no variant found for inventory_item_id={inventory_item_id} (REST+GQL)"
+                        "reason": f"no variant found for inventory_item_id={inventory_item_id} (GQL+REST)"
                     }
                 )
-            variant_id = str(gql["variant_id"])
-            product_id = str(gql["product_id"])
 
         result = await used_book_manager.process_inventory_change(
             inventory_item_id=str(inventory_item_id),
