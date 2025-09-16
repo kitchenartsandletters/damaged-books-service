@@ -28,7 +28,7 @@ async def apply_product_rules_with_product(product_id: str, damaged_handle: str,
 
         if any_in_stock:
             # Publish damaged product and remove redirect if present
-            await product_service.set_product_publish_status(product_id, True)
+            await shopify_client.set_product_publish_status(product_id, True)
             existing = await redirect_service.find_redirect_by_path(damaged_handle)
             if existing:
                 deleted = await redirect_service.delete_redirect(str(existing.get("id")))
@@ -41,7 +41,7 @@ async def apply_product_rules_with_product(product_id: str, damaged_handle: str,
                     )
         else:
             # Unpublish damaged product and ensure redirect exists
-            await product_service.set_product_publish_status(product_id, False)
+            await shopify_client.set_product_publish_status(product_id, False)
             existing = await redirect_service.find_redirect_by_path(damaged_handle)
             if not existing:
                 created = await redirect_service.create_redirect(damaged_handle, canonical_handle)
