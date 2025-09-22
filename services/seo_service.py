@@ -70,9 +70,12 @@ async def resolve_canonical_handle(damaged_handle: str, product: dict | None = N
                 normalized = parts[1] if len(parts) == 2 else raw_target.lstrip('/')
             else:
                 normalized = raw_target
-            if normalized:
-                logger.info(f"Canonical handle resolved via redirect: '{normalized}'")
-                return normalized
+            if "coroutine" in str(normalized).lower():
+                logger.warning(f"Ignoring invalid coroutine redirect target for handle '{stripped}': {normalized}")
+            else:
+                if normalized:
+                    logger.info(f"Canonical handle resolved via redirect: '{normalized}'")
+                    return normalized
         logger.info(f"No redirect found for handle '{stripped}'")
     except Exception as e:
         logger.warning(f"Error checking redirect for handle '{stripped}': {e}")

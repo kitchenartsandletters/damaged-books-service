@@ -157,7 +157,7 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
         quantities = edges[0]["node"].get("quantities", [])
         for q in quantities:
             if q.get("name") == "available":
-                available = q.get("quantity", 0)
+                available = coerce_quantity(q.get("quantity", 0))
                 break
     logger.info(f"[InventoryService] Raw variant payload: {variant}")
     product = (variant.get("product") or {})

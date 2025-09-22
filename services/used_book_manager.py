@@ -76,7 +76,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
 
         # Stock status (prefer hint if provided)
         if available_hint is not None:
-            is_in_stock = available_hint > 0
+            is_in_stock = coerce_quantity(available_hint) > 0
         else:
             is_in_stock = await inventory_service.is_variant_in_stock(variant_id, inventory_item_id)
         logger.info(f"[Inventory] Damaged book {handle} stock status: {'in stock' if is_in_stock else 'out of stock'}")
@@ -138,7 +138,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             condition=condition_key,          # condition == condition_key
             condition_raw=condition_raw,
             condition_key=condition_key,
-            available=coerce_quantity(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
+            available=coerce_quantity(available_hint if available_hint is not None else (1 if is_in_stock else 0)),
             source="webhook",
             title=product.get("title"),
             sku=(str(variant_data.get("sku")) if variant_data else None),
