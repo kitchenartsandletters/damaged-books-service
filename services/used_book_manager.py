@@ -6,7 +6,7 @@ from services import notification_service
 from services.shopify_client import shopify_client
 import os
 from typing import Optional
-from services.inventory_service import resolve_by_inventory_item_id
+from services.inventory_service import resolve_by_inventory_item_id, coerce_quantity
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ async def apply_product_rules_with_product(product_id: str, damaged_handle: str,
         rows_resp = damaged_inventory_repo.list_view(limit=2000, in_stock=None)
         rows = rows_resp.data or []
         product_rows = [r for r in rows if (r.get("handle") or "").lower() == damaged_handle.lower()]
-        any_in_stock = any(int(r.get("available") or 0) > 0 for r in product_rows)
+        any_in_stock = any(coerce_quantity(r.get("available")) > 0 for r in product_rows)
 
         if any_in_stock:
             # Publish damaged product and remove redirect if present
@@ -138,7 +138,7 @@ async def process_inventory_change(inventory_item_id: str, variant_id: str, prod
             condition=condition_key,          # condition == condition_key
             condition_raw=condition_raw,
             condition_key=condition_key,
-            available=int(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
+            available=coerce_quantity(available_hint) if available_hint is not None else (1 if is_in_stock else 0),
             source="webhook",
             title=product.get("title"),
             sku=(str(variant_data.get("sku")) if variant_data else None),

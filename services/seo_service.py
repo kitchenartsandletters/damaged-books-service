@@ -6,6 +6,12 @@ from services import redirect_service
 import re
 from typing import Optional
 
+def normalize_handle(handle: str) -> str:
+    # Collapse multiple hyphens to single
+    handle = re.sub(r'-{2,}', '-', handle)
+    # Strip leading/trailing hyphens
+    return handle.strip('-')
+
 async def update_used_book_canonicals(product, canonical_handle):
     """
     Writes the provided canonical handle to the Shopify metafield for the given product.
@@ -49,6 +55,9 @@ async def resolve_canonical_handle(damaged_handle: str, product: dict | None = N
     else:
         stripped = damaged_handle
         logger.info(f"No '-damaged' suffix found. Using handle as-is: '{stripped}'")
+
+    stripped = normalize_handle(stripped)
+    logger.info(f"Normalized handle to: '{stripped}'")
 
     # 2. Check redirect service
     try:

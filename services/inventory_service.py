@@ -6,6 +6,12 @@ from services.shopify_client import shopify_client
 
 logger = logging.getLogger(__name__)
 
+def coerce_quantity(value) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return 0
+
 def _extract_condition_from_variant(variant: dict) -> Optional[str]:
     """
     Extract the variant option related to condition/damage.
@@ -50,7 +56,7 @@ async def is_variant_in_stock(variant_id: str, inventory_item_id: str, *, availa
     try:
         # Fast path: webhook provided the 'available' quantity
         if available_hint is not None:
-            return int(available_hint) > 0
+            return coerce_quantity(available_hint) > 0
 
         # Fallback: fetch inventory level for this inventory_item_id at all locations
         resp = await shopify_client.get(
@@ -62,7 +68,7 @@ async def is_variant_in_stock(variant_id: str, inventory_item_id: str, *, availa
         total_available = 0
         for lvl in levels:
             try:
-                total_available += int(lvl.get("available") or 0)
+                total_available += coerce_quantity(lvl.get("available"))
             except Exception:
                 continue
         return total_available > 0
@@ -177,7 +183,7 @@ async def resolve_by_inventory_item_id(inventory_item_id: int, location_gid: str
     except Exception:
         inventory_item_id_int = int(str(inventory_item_id).split("/")[-1])
     return {
-        "available": int(available),
+        "available": coerce_quantity(available),
         "inventory_item_id": inventory_item_id_int,
         "variant": variant,
         "product": product,
