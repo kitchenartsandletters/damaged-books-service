@@ -209,6 +209,7 @@ curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
 
 ---
 
+
 ## Roadmap
 
 - Use `available_hint` for faster stock checks.
@@ -219,6 +220,109 @@ curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
 - Add end-to-end integration tests.
 - Optional Gateway HMAC verification.
 - Support idempotency table keyed by `X-Gateway-Event-ID`.
+
+## Bulk Creation & Duplicate‑Prevention Roadmap (2025 Phase)
+
+This section documents the new Bulk Damaged‑Book Creation Wizard initiative and the supporting backend infrastructure. It summarizes **what has been completed** and **what remains open**, organized so the README can serve as the project tracker for the next development phase.
+
+---
+
+### ✅ Completed (Phase 1)
+
+**Backend foundations**
+- Added `product_service.check_damaged_duplicate()` for pre‑creation duplicate detection.
+- Added Admin API routes:
+  - `POST /admin/check-duplicate` (single product duplicate guard)
+  - `POST /admin/bulk-preview` (multi-product preflight with conflict reporting)
+- Implemented handle normalization across preview endpoints.
+- Consolidated condition extraction mapping into `inventory_service` to prevent double-mapping.
+- Implemented safe quantity‑coercion (`int(float(x))`) within `inventory_service` and `used_book_manager`.
+- Fixed redirect‑coroutine bug in `seo_service.resolve_canonical_handle`.
+- Added Shopify rate‑limit hardening (memoized redirect lookups + reduced calls).
+- Established the architectural contract for **canonical metafield strategy** and tested consistent canonical writes.
+
+**Operational improvements**
+- Prevent Shopify suffix pollution (`-1`, `-2`) by introducing pre‑creation duplicate guards.
+- Added logging around variant→product resolution and Supabase upserts.
+- Reconcile is now fully GraphQL‑based and aligned with webhook logic.
+
+---
+
+### 🚧 In Progress (Phase 2 — Core Creation Engine)
+
+These items are required to safely create canonical/damaged product pairs programmatically:
+
+1. `product_service.create_damaged_pair()` — **Full implementation needed**
+   - Create canonical product (draft)
+   - Create damaged product (active, 3 condition variants)
+   - Return structured canonical/damaged metadata to caller
+
+2. Strengthen duplicate‑prevention logic
+   - Prevent duplicate Shopify handles pre‑creation
+   - Prevent duplicates in Supabase `inventory` table
+   - Provide structured conflict explanations for UI
+
+3. Finalize schemas for the Dashboard wizard (request + response)
+   - `BulkDuplicateCheckRequest`
+   - `BulkPreviewResponse`
+   - `BulkCreateResponse`
+   - Conflict objects with standardized reasons/codes
+
+4. Finish `/admin/bulk-create`
+   - Add dry‑run support
+   - Add structured results mapping each input to creation success/failure
+   - Integrate Supabase logging (see next phase)
+
+---
+
+### 🗂️ Phase 3 — Dashboard Wizard UI (Upcoming)
+
+1. **Preflight Screen**
+   - Upload/enter batch of titles/handles
+   - Call `/admin/bulk-preview`
+   - Display conflict resolution UI
+
+2. **Conflict Resolution Modal**
+   - Edit canonical/damaged handles
+   - Remove items from batch
+   - Re-run preview step
+
+3. **Confirmation Step**
+   - Summary table of creations
+   - Operator confirmation required before finalizing
+   - POST `/admin/bulk-create`
+
+4. **Post‑Creation Summary**
+   - Show Shopify links
+   - Show Supabase log IDs
+   - Highlight any partially created entries
+
+---
+
+### 🗄️ Phase 4 — Logging & Observability (Upcoming)
+
+- Create Supabase table: `damaged.creation_log`
+- Record:
+  - operator ID
+  - canonical/damaged handles
+  - product IDs
+  - timestamps
+  - notes (warnings, conflicts, resolutions)
+- Add API endpoint: `GET /admin/creation-log`
+- Add Dashboard viewer page
+
+---
+
+### 🧪 Optional Enhancements (Future)
+- “Quick Add” single‑item modal in Dashboard
+- Shopify catalog selector to auto-fill canonicals
+- Full dry-run simulator using abstracted Shopify client
+- Pre‑publishing GID caching to reduce Shopify calls
+- Idempotency for bulk operations using UUID batch keys
+
+---
+
+This roadmap is the authoritative checklist for the Bulk Creation Initiative and accompanies the existing DBS architecture sections above.
 
 
 ## Canonical URLs
