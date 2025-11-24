@@ -221,6 +221,53 @@ curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
 - Optional Gateway HMAC verification.
 - Support idempotency table keyed by `X-Gateway-Event-ID`.
 
+
+## Damaged Product Creation Rules (Locked Specification)
+
+These rules define the **canonical behavior** for creating damaged products via DBS and the Bulk Creation Wizard. They override all prior specifications.
+
+### Product‑Level Rules
+
+- **Title:** `canonical.title + ": Damaged"`  
+- **Handle:** `canonical.handle + "-damaged"`  
+- **Body HTML:**  
+  The damaged product description must be **exactly** the following fixed preamble and must not be modified:
+
+```
+We received some copies of this book which are less than perfect. While supplies last, we are offering these copies at a reduced price.  These copies are first come, first served: we cannot reserve one for you. And we cannot predict when we might receive more once we sell out of them, mostly because we really don't want to get any more damaged copies. 😊
+When you order one of these books, we'll use our judgment to choose the best remaining copy for you in the category you choose. Purchases of damaged books are final sales: they are not refundable or exchangeable.
+```
+
+- **Vendor:** inherit from canonical.  
+- **Product type:** inherit from canonical (`BOOK`).  
+- **Tags:** inherit canonical tags **and append** `"damaged"`.  
+- **Collections:** do **not** inherit; damaged books are not auto‑assigned to any collection.  
+- **Status:** always created as **DRAFT**.  
+- **Images:** copy **only the first** canonical image (cover).  
+- **SEO title:** inherit canonical SEO title and append `" (Damaged)"`.  
+- **SEO description:** **do not inherit**; SEO description is not used for condition copy.  
+- **Metafield `custom.canonical_handle`:** set to the canonical product’s **product.handle** (not canonical_url).  
+- **Inventory behavior:** managed exclusively at the variant level.
+
+### Variant‑Level Rules (Light / Moderate / Heavy Damage)
+
+Each damaged product always contains **three** variants:
+
+- **Titles:** `"Light Damage"`, `"Moderate Damage"`, `"Heavy Damage"`.  
+- **Pricing (default discounts):**
+  - Light — 15% off canonical price  
+  - Moderate — 30% off  
+  - Heavy — 60% off  
+  Bulk Wizard may override at creation time via `%` or `$` adjustments.
+- **Compare‑at price:** currently **unset** (future decision).  
+- **Weight:** inherit from canonical.  
+- **SKU:** inherit canonical SKU (DBS convention: SKU contains author name).  
+- **Barcode:** inherit canonical barcode (ISBN).  
+- **Inventory management:** `"shopify"`.  
+- **Inventory policy:** `"deny"` — damaged books **cannot oversell**.  
+- **Initial quantity:** `0` unless user supplies explicit quantities during Bulk Creation.  
+- **Condition descriptions:** not stored in product fields; appear only through theme‑side Liquid logic.
+
 ## Bulk Creation & Duplicate‑Prevention Roadmap (2025 Phase)
 
 This section documents the new Bulk Damaged‑Book Creation Wizard initiative and the supporting backend infrastructure. It summarizes **what has been completed** and **what remains open**, organized so the README can serve as the project tracker for the next development phase.
