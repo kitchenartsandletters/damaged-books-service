@@ -3,8 +3,68 @@
 import logging
 from datetime import datetime
 from services.shopify_client import shopify_client
+from services.supabase_client import supabase_client
+from backend.app.schemas import (
+    DuplicateCheckRequest,
+    DuplicateCheckResponse,
+    BulkCreateRequest,
+    BulkCreateResult,
+    CanonicalProductInfo,
+    VariantSeed,
+    CreatedVariantInfo,
+)
+from services.creation_log_service import log_creation_event
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Variant helpers & condition metadata
+# ---------------------------------------------------------------------------
+
+CONDITION_META = {
+    "light": {
+        "title": "Light Damage",
+        "default_discount": 0.15,
+    },
+    "moderate": {
+        "title": "Moderate Damage",
+        "default_discount": 0.30,
+    },
+    "heavy": {
+        "title": "Heavy Damage",
+        "default_discount": 0.60,
+    },
+}
+
+def _snake_handle(handle: str) -> str:
+    """
+    Convert canonical handle into a snake_case-ish base for synthetic barcodes.
+    Example: 'pride-and-prejudice' -> 'pride_and_prejudice'
+    """
+    h = (handle or "").strip().lower()
+    return h.replace("-", "_").replace(" ", "_")
+
+def _make_barcode_for_condition(canonical_handle: str, condition_key: str) -> str:
+    """
+    Synthetic barcode: <snake_handle>_<condition_key>
+    Example: 'pride-and-prejudice', 'light' -> 'pride_and_prejudice_light'
+    """
+    base = _snake_handle(canonical_handle)
+    return f"{base}_{condition_key}"
+
+def _normalize_condition_from_title(title: str | None) -> str | None:
+    """
+    Map variant title (e.g. 'Light Damage') back to canonical condition keys:
+    'light', 'moderate', 'heavy'.
+    """
+    t = (title or "").lower()
+    if "light" in t:
+        return "light"
+    if "moderate" in t or "mod " in t:
+        return "moderate"
+    if "heavy" in t:
+        return "heavy"
+    return None
 
 async def find_existing_by_handle(handle: str) -> dict | None:
     """
@@ -26,32 +86,6 @@ async def find_existing_by_handle(handle: str) -> dict | None:
         return None
 
 
-async def prevent_duplicate_creation(canonical_handle: str, damaged_handle: str, title: str) -> dict | None:
-    """
-    Duplicate-prevention logic for damaged book creation.
-    - Prevent duplicate damaged products for same canonical
-    - Prevent handle collisions
-    - Return existing product if duplicate found
-    """
-    try:
-        # 1. Test canonical → damaged uniqueness rule
-        existing = await find_existing_by_handle(damaged_handle)
-        if existing:
-            logger.info(f"[DuplicateCheck] Damaged product already exists for {canonical_handle}: {existing.get('id')}")
-            return {"duplicate": True, "existing": existing}
-
-        # 2. Ensure no other damaged product under same canonical root
-        root = canonical_handle.lower().strip()
-        resp = await shopify_client.get("products.json", query={"handle": f"{root}-damaged"})
-        existing_root = resp.get("body", {}).get("products", [])
-        if existing_root:
-            logger.info(f"[DuplicateCheck] Canonical already has a damaged product: {existing_root[0].get('id')}")
-            return {"duplicate": True, "existing": existing_root[0]}
-
-        return {"duplicate": False}
-    except Exception as e:
-        logger.warning(f"[DuplicateCheck] prevention failed: {e}")
-        return {"duplicate": False}
 
 
 async def check_damaged_duplicate(
@@ -202,29 +236,147 @@ async def check_damaged_duplicate(
             "safe_to_create": False
         }
 
-# Wrapper used by DBS when creating damaged products.
-# Performs duplicate‑prevention before allowing Shopify creation.
-async def create_damaged_product_with_duplicate_check(canonical_handle: str, damaged_handle: str, title: str, payload: dict):
+async def create_damaged_product_with_duplicate_check(
+    data: BulkCreateRequest
+) -> BulkCreateResult:
     """
-    Wrapper used by DBS when creating damaged products.
-    Performs duplicate‑prevention before allowing Shopify creation.
-    Returns:
-        {"duplicate": True, "existing": <product>}  if creation should be skipped
-        {"duplicate": False, "created": <product>}  if a new product was made
-    """
-    # 1. Run duplicate‑prevention preflight
-    dup = await prevent_duplicate_creation(canonical_handle, damaged_handle, title)
-    if dup and dup.get("duplicate"):
-        return dup
+    Duplicate-check → optional dry-run → create damaged product → return BulkCreateResult.
 
-    # 2. Safe product creation
+    Variant-level controls:
+      - data.variants: list[VariantSeed] with:
+          condition: 'light' | 'moderate' | 'heavy'
+          quantity: optional int (purely reported for now)
+          price_override: optional float (percentage OFF; 0.25 == 25% off)
+      - compare_at_price is currently ignored at this phase.
+    """
+
+    # Build a quick lookup map for variant seeds keyed by condition
+    seed_by_condition: dict[str, VariantSeed] = {}
+    for seed in data.variants or []:
+        key = (seed.condition or "").strip().lower()
+        if key:
+            seed_by_condition[key] = seed
+
+    # -------------------------------------------------------
+    # Step 1: Duplicate check
+    # -------------------------------------------------------
+    dup_result = await check_damaged_duplicate(
+        canonical_handle=data.canonical_handle,
+        damaged_handle=data.damaged_handle,
+    )
+
+    if dup_result.get("status") != "ok" or not dup_result.get("safe_to_create", False):
+        logger.warning(f"[BulkCreate] Conflict detected for {data.damaged_handle}")
+
+        result = BulkCreateResult(
+            status="error",
+            damaged_product_id=None,
+            damaged_handle=data.damaged_handle,
+            variants=[],
+            messages=["Duplicate or conflict detected; creation aborted."],
+        )
+
+        # Log (Option A — log everything)
+        try:
+            await log_creation_event(data, result, operator=None)
+        except Exception as e:
+            logger.warning(f"[CreationLog] Failed to write conflict log: {e}")
+
+        return result
+
+    # -------------------------------------------------------
+    # Step 2: Dry-run mode (no Shopify mutation)
+    # -------------------------------------------------------
+    if data.dry_run:
+        logger.info(f"[BulkCreate] Dry run for {data.damaged_handle}")
+
+        result = BulkCreateResult(
+            status="dry-run",
+            damaged_product_id=None,
+            damaged_handle=data.damaged_handle,
+            variants=[],
+            messages=["Dry run: no product created."],
+        )
+
+        try:
+            await log_creation_event(data, result, operator=None)
+        except Exception as e:
+            logger.warning(f"[CreationLog] Failed to write dry-run log: {e}")
+
+        return result
+
+    # -------------------------------------------------------
+    # Step 3: Create damaged product via create_damaged_pair()
+    # DBS NEVER creates canonical products.
+    # We pass variant seeds so create_damaged_pair can apply price overrides.
+    # -------------------------------------------------------
+    created = await create_damaged_pair(
+        canonical_title=data.canonical_title,
+        canonical_handle=data.canonical_handle,
+        damaged_title=data.damaged_title,
+        damaged_handle=data.damaged_handle,
+        isbn=data.isbn,
+        barcode=data.barcode,
+        variants=data.variants,  # <-- NEW: pass VariantSeed list
+    )
+
+    damaged = created.get("damaged", {}) or {}
+    damaged_id = damaged.get("id")
+    damaged_handle = damaged.get("handle")
+
+    # -------------------------------------------------------
+    # Step 4: Extract CreatedVariantInfo[]
+    # (Bulk-create does NOT mutate inventory yet → quantity_set reports the
+    #  requested quantity but does not adjust Shopify inventory at this phase.)
+    # -------------------------------------------------------
+    extracted_variants: list[CreatedVariantInfo] = []
+
+    for v in damaged.get("variants", []) or []:
+        title = v.get("title")
+        cond_key = _normalize_condition_from_title(title)
+        qty = 0
+
+        if cond_key and cond_key in seed_by_condition:
+            seed = seed_by_condition[cond_key]
+            if seed.quantity is not None:
+                try:
+                    qty = int(seed.quantity)
+                except Exception:
+                    qty = 0
+
+        extracted_variants.append(
+            CreatedVariantInfo(
+                condition=title,
+                variant_id=v.get("id"),
+                quantity_set=qty,
+                price=float(v.get("price") or 0),
+                sku=v.get("sku"),
+                barcode=v.get("barcode"),
+                inventory_management=v.get("inventory_management"),
+                inventory_policy=v.get("inventory_policy"),
+            )
+        )
+
+    # -------------------------------------------------------
+    # Step 5: Build final BulkCreateResult
+    # -------------------------------------------------------
+    result = BulkCreateResult(
+        status="created",
+        damaged_product_id=damaged_id,
+        damaged_handle=damaged_handle,
+        variants=extracted_variants,
+        messages=["Damaged product created successfully."],
+    )
+
+    # -------------------------------------------------------
+    # Step 6: Write to creation_log (Option A: log all runs)
+    # -------------------------------------------------------
     try:
-        resp = await shopify_client.post("products.json", data={"product": payload})
-        created = resp.get("body", {}).get("product", {})
-        return {"duplicate": False, "created": created}
+        await log_creation_event(data, result, operator=None)
     except Exception as e:
-        logger.error(f"[CreateDamaged] Failed creating {damaged_handle}: {e}")
-        raise
+        logger.warning(f"[CreationLog] Failed to write create log: {e}")
+
+    return result
 
 def parse_damaged_handle(handle: str) -> tuple[str, str]:
     """
@@ -275,6 +427,7 @@ def is_damaged_handle(handle: str) -> bool:
     """Preferred function to check if a handle is for a damaged or used book."""
     return is_used_book_handle(handle)
 
+
 async def create_damaged_pair(
     canonical_title: str,
     canonical_handle: str,
@@ -282,167 +435,166 @@ async def create_damaged_pair(
     damaged_handle: str,
     isbn: str | None = None,
     barcode: str | None = None,
+    variants: list[VariantSeed] | None = None,
 ) -> dict:
     """
-    Create a canonical product AND its damaged companion at the same time.
-    Used by the Admin Dashboard bulk creation wizard.
+    Create damaged companion product only, based on an existing canonical product.
+    DBS NEVER creates canonical products.
 
-    Rules:
-      • Canonical product:
-          - published_at = None  (DRAFT)
-          - one default variant
-          - SKU = optional ISBN/author (we keep SKU flexible)
-          - barcode = ISBN if provided
-          - inventory tracking off by default (left to DBS)
-      • Damaged product:
-          - published_at = now (ACTIVE)
-          - three variants:
-              Light Damage / Moderate Damage / Heavy Damage
-          - barcode always None for damaged variants
-      • No inventory adjustments here.
-      • No redirects.
-      • No canonical metafield update.
-      • No DBS upsert — inventory-level events will later do that.
-
-    Returns:
-      {
-        "canonical": <created canonical product dict>,
-        "damaged": <created damaged product dict>
-      }
+    Variant behavior:
+      - Always creates 3 condition variants: Light / Moderate / Heavy Damage.
+      - Default discounts (off canonical price):
+          light   = 15%
+          moderate= 30%
+          heavy   = 60%
+      - If VariantSeed.price_override is provided for a condition:
+          price = canonical_price * (1 - price_override)
+        (Option A: percentage OFF)
+      - SKU: canonical variant sku (author) is copied to all damaged variants.
+      - Barcode: synthetic, not inherited:
+          snake_case(canonical_handle) + '_' + condition_key
+          e.g. 'pride_and_prejudice_light'
+      - Inventory_management: 'shopify'
+      - Inventory_policy: 'deny' (no overselling of damaged books)
     """
 
-    logger.info(
-        "[CreateDamagedPair] Creating canonical=%s damaged=%s",
-        canonical_handle, damaged_handle
+    logger.info(f"[CreateDamagedPair] canonical={canonical_handle}, damaged={damaged_handle}")
+
+    # 1. Fetch canonical
+    canonical = await find_existing_by_handle(canonical_handle)
+    if not canonical:
+        raise RuntimeError(f"Canonical product not found for handle '{canonical_handle}'.")
+
+    canonical_variant = (canonical.get("variants") or [{}])[0]
+    canonical_price_raw = canonical_variant.get("price") or "0.00"
+
+    try:
+        canonical_price = float(canonical_price_raw)
+    except Exception:
+        canonical_price = 0.0
+
+    canonical_barcode = canonical_variant.get("barcode")  # no longer used directly
+    canonical_sku = canonical_variant.get("sku")          # DBS rule: sku = author; we inherit this
+    vendor = canonical.get("vendor")
+    product_type = canonical.get("product_type")
+    canonical_tags = canonical.get("tags", [])
+    canonical_images = canonical.get("images", [])
+    canonical_image_src = canonical_images[0]["src"] if canonical_images else None
+
+    # Build a quick lookup for VariantSeed by condition (light/moderate/heavy)
+    seed_by_condition: dict[str, VariantSeed] = {}
+    for seed in variants or []:
+        key = (seed.condition or "").strip().lower()
+        if key:
+            seed_by_condition[key] = seed
+
+    # 2. Static damaged copy (MUST NOT BE CHANGED)
+    damaged_preamble = (
+        "We received some copies of this book which are less than perfect. "
+        "While supplies last, we are offering these copies at a reduced price. "
+        "These copies are first come, first served: we cannot reserve one for you. "
+        "And we cannot predict when we might receive more once we sell out of them, "
+        "mostly because we really don't want to get any more damaged copies. 😊\n"
+        "When you order one of these books, we'll use our judgment to choose the best remaining "
+        "copy for you in the category you choose. Purchases of damaged books are final sales: "
+        "they are not refundable or exchangeable."
     )
 
-    # --------------------------------------------------------
-    # 1. Prepare canonical product payload
-    # --------------------------------------------------------
-    canonical_payload = {
-        "product": {
-            "title": canonical_title,
-            "handle": canonical_handle,
-            "published_at": None,     # <= DRAFT
-            "status": "draft",
-            "variants": [
-                {
-                    "title": canonical_title,
-                    "sku": isbn or "",
-                    "barcode": isbn or barcode or None,
-                    "inventory_management": None,
-                    "price": "0.00"
-                }
-            ],
-        }
-    }
+    # 3. SEO
+    seo_title = f"{canonical_title} (Damaged)"
+    seo_description = damaged_preamble
 
-    # --------------------------------------------------------
-    # 2. Prepare damaged product payload
-    # --------------------------------------------------------
-    damaged_payload = {
+    # 4. Discount + price override logic (Option A: percentage OFF)
+    def compute_price_for_condition(cond_key: str) -> str:
+        meta = CONDITION_META.get(cond_key)
+        if not meta:
+            return canonical_price_raw
+
+        default_pct = meta["default_discount"]
+
+        override_pct: float | None = None
+        seed = seed_by_condition.get(cond_key)
+        if seed and seed.price_override is not None:
+            try:
+                override_pct = float(seed.price_override)
+            except Exception:
+                override_pct = None
+
+        pct = override_pct if override_pct is not None else default_pct
+
+        try:
+            return f"{canonical_price * (1 - pct):.2f}"
+        except Exception:
+            return canonical_price_raw
+
+    # 5. Build variant payloads (3 condition variants)
+    variant_payloads: list[dict] = []
+
+    for cond_key in ("light", "moderate", "heavy"):
+        meta = CONDITION_META[cond_key]
+        title = meta["title"]
+
+        variant_payloads.append(
+            {
+                "title": title,
+                "option1": title,
+                "sku": canonical_sku or "",
+                "barcode": _make_barcode_for_condition(canonical_handle, cond_key),
+                "price": compute_price_for_condition(cond_key),
+                "inventory_management": "shopify",
+                "inventory_policy": "deny",  # Damaged books NEVER continue selling
+            }
+        )
+
+    # 6. Build product payload
+    payload = {
         "product": {
             "title": damaged_title,
             "handle": damaged_handle,
-            "published_at": datetime.utcnow().isoformat(),  # <= ACTIVE
-            "status": "active",
-            "variants": [
+            "status": "draft",  # created as draft; publishing is handled elsewhere
+            "body_html": damaged_preamble,
+            "vendor": vendor,
+            "product_type": product_type,
+            "tags": list(set(canonical_tags + ["damaged"])),
+            "images": [{"src": canonical_image_src}] if canonical_image_src else [],
+            "metafields": [
                 {
-                    "title": "Light Damage",
-                    "sku": "",
-                    "barcode": None,
-                    "option1": "Light Damage",
-                    "price": "0.00"
-                },
-                {
-                    "title": "Moderate Damage",
-                    "sku": "",
-                    "barcode": None,
-                    "option1": "Moderate Damage",
-                    "price": "0.00"
-                },
-                {
-                    "title": "Heavy Damage",
-                    "sku": "",
-                    "barcode": None,
-                    "option1": "Heavy Damage",
-                    "price": "0.00"
-                },
+                    "namespace": "custom",
+                    "key": "canonical_handle",
+                    "value": canonical_handle,
+                    "type": "single_line_text_field",
+                }
             ],
             "options": [
                 {
                     "name": "Condition",
-                    "values": ["Light Damage", "Moderate Damage", "Heavy Damage"]
+                    "values": [
+                        CONDITION_META["light"]["title"],
+                        CONDITION_META["moderate"]["title"],
+                        CONDITION_META["heavy"]["title"],
+                    ],
                 }
             ],
+            "variants": variant_payloads,
+            "seo": {"title": seo_title, "description": seo_description},
         }
     }
 
-    # --------------------------------------------------------
-    # 3. Create canonical first
-    # --------------------------------------------------------
-    try:
-        resp_canon = await shopify_client.post("products.json", data=canonical_payload)
-        canonical = resp_canon.get("body", {}).get("product")
-        if not canonical:
-            raise RuntimeError(f"Canonical creation failed for {canonical_handle}: {resp_canon}")
-    except Exception as e:
-        logger.error(f"[CreateDamagedPair] Canonical creation error for {canonical_handle}: {e}")
-        raise
+    # 7. Create damaged product
+    resp = await shopify_client.post("products.json", data=payload)
+    damaged = resp.get("body", {}).get("product")
+    if not damaged:
+        raise RuntimeError(f"Failed to create damaged product {damaged_handle}")
 
-    canonical_id = canonical.get("id")
-    logger.info(f"[CreateDamagedPair] Canonical created id={canonical_id}")
+    logger.info(f"[CreateDamagedPair] Created damaged id={damaged.get('id')}")
 
-    # --------------------------------------------------------
-    # 4. Create damaged next
-    # --------------------------------------------------------
-    try:
-        resp_dmg = await shopify_client.post("products.json", data=damaged_payload)
-        damaged = resp_dmg.get("body", {}).get("product")
-        if not damaged:
-            raise RuntimeError(f"Damaged creation failed for {damaged_handle}: {resp_dmg}")
-    except Exception as e:
-        logger.error(f"[CreateDamagedPair] Damaged creation error for {damaged_handle}: {e}")
-        raise
+    return {"canonical": canonical, "damaged": damaged}
 
-    damaged_id = damaged.get("id")
-    logger.info(f"[CreateDamagedPair] Damaged created id={damaged_id}")
-
-    # --------------------------------------------------------
-    # 5. Return structured result
-    # --------------------------------------------------------
-    return {
-        "canonical": canonical,
-        "damaged": damaged,
-    }
 
 # --------------------------------------------------------
 # _publish_to_online_store and _unpublish_from_online_store are not referenced in routes.py or used_book_manager.py (both use set_product_publish_status).
 # Decision point: keep them for future fallback OR remove if we want to enforce one publishing pathway.
 # --------------------------------------------------------
-
-async def _publish_to_online_store(product_id: str) -> None:
-    """
-    Ensure the product is listed in Online Store.
-    POST /product_listings.json
-    """
-    try:
-        payload = {"product_listing": {"product_id": product_id}}
-        await shopify_client.post("product_listings.json", data=payload)
-    except Exception as e:
-        logger.warning(f"Online Store publish failed for product {product_id}: {str(e)}")
-
-
-async def _unpublish_from_online_store(product_id: str) -> None:
-    """
-    Ensure the product is removed from Online Store listing.
-    DELETE /product_listings/{id}.json
-    """
-    try:
-        await shopify_client.delete(f"product_listings/{product_id}.json")
-    except Exception as e:
-        # If it wasn't listed, Shopify may 404—treat as benign
-        logger.info(f"Online Store unpublish note for product {product_id}: {str(e)}")
 
 # ⬇️ make async and await the client
 async def get_product_by_id(product_id: str) -> dict:

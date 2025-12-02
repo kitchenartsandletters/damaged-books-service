@@ -51,7 +51,7 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 - **used_book_manager:** Orchestrates the flow. **Trusts the hydrated product passed in** (no additional product GETs), extracts condition, upserts to Supabase, runs publish/unpublish + redirect rules, and triggers canonical write exactly once per event.
 - **seo_service:** Resolves canonical handle (strip `-damaged`, check redirect, else trust stripped handle) and writes `metafields.custom.canonical_handle` one time per webhook event.
 - **redirect_service:** Finds, creates, and deletes redirects between damaged and canonical handles.
-- **product_service:** **Deprecated**. All publish/unpublish is handled by `shopify_client.set_product_publish_status(...)`.
+- **product_service:** Hosts duplicate‑checking and bulk damaged‑product creation helpers (e.g., `check_damaged_duplicate`, `create_damaged_pair`, `create_damaged_product_with_duplicate_check`). Publish/unpublish remains the responsibility of `shopify_client.set_product_publish_status(...)`; product_service no longer drives status toggles.
 
 ---
 
@@ -82,9 +82,14 @@ The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inve
 - **Admin endpoints (require `X-Admin-Token`):**
     - `GET /admin/docs` — Link hub for admin tools.
     - `GET /admin/damaged-inventory` — List current damaged inventory (header: `X-Result-Count`).
+    - `POST /admin/check-duplicate` — Single-entry duplicate check for the Bulk Creation Wizard.
+    - `POST /admin/bulk-preview` — Multi-entry preflight duplicate scan (read-only, no Shopify mutations).
+    - `POST /admin/bulk-create` — Execute bulk damaged-product creation (with built-in duplicate guard).
+    - `GET /admin/creation-log` — Return recent damaged‑product creation events (for Dashboard history).
     - `POST /admin/reconcile` — Run a full reconcile/refresh pipeline (see below).
     - `GET /admin/reconcile/status` — Latest reconcile stats.
 - **Utility endpoints:** (for diagnostics/dev)
+    - `GET /admin/logs` — Return link(s) to external log viewer (Supabase / Gateway logs UI).
     - `POST /api/products/check` — Manually trigger inventory logic for a specific variant.
     - `POST /api/products/scan-all` — Batch scan (placeholder).
     - `GET /api/products`, `GET /api/products/{product_id}`, `PUT /api/products/{product_id}/publish|unpublish` — Product helpers.
@@ -272,6 +277,9 @@ Each damaged product always contains **three** variants:
 
 This section documents the new Bulk Damaged‑Book Creation Wizard initiative and the supporting backend infrastructure. It summarizes **what has been completed** and **what remains open**, organized so the README can serve as the project tracker for the next development phase.
 
+> **Important:** The DBS **never creates canonical products.** The Bulk Creation Wizard assumes the canonical (non‑damaged) product already exists in Shopify. The service only creates the corresponding damaged product (with three condition variants) and wires it into Supabase/DBS according to the rules below.
+
+
 ---
 
 ### ✅ Completed (Phase 1)
@@ -295,30 +303,34 @@ This section documents the new Bulk Damaged‑Book Creation Wizard initiative an
 
 ---
 
-### 🚧 In Progress (Phase 2 — Core Creation Engine)
+### 🚧 Phase 2 — Core Creation Engine (Current Status)
 
-These items are required to safely create canonical/damaged product pairs programmatically:
+**Implemented:**
+- `backend/app/schemas.py` defines the request/response models for duplicate checks and bulk creation:
+  - `DuplicateCheckRequest` / `DuplicateCheckResponse`
+  - `BulkCreateRequest` / `BulkCreateResult`
+  - `CanonicalProductInfo`, `VariantSeed`, `CreatedVariantInfo`
+- `product_service.check_damaged_duplicate(...)` powers:
+  - `POST /admin/check-duplicate` (single entry)
+  - `POST /admin/bulk-preview` (multi-entry preflight)
+- `product_service.create_damaged_pair(...)` creates a **damaged product only** (canonical must already exist) using the “Damaged Product Creation Rules” and returns structured metadata for the damaged product.
+- `product_service.create_damaged_product_with_duplicate_check(...)` wraps duplicate checking + optional dry-run for single‑item wizard flows.
+- `POST /admin/bulk-create` is wired to:
+  - re-run duplicate checks for every entry (hard guard: any conflict → 409, no creations),
+  - call `create_damaged_pair(...)` for each safe entry,
+  - return a structured list of per-entry results.
+- Basic creation logging is wired via `creation_log_service.log_creation_event(...)` and exposed via `GET /admin/creation-log` (migration for the underlying table is still tracked separately in Phase 4).
 
-1. `product_service.create_damaged_pair()` — **Full implementation needed**
-   - Create canonical product (draft)
-   - Create damaged product (active, 3 condition variants)
-   - Return structured canonical/damaged metadata to caller
-
-2. Strengthen duplicate‑prevention logic
-   - Prevent duplicate Shopify handles pre‑creation
-   - Prevent duplicates in Supabase `inventory` table
-   - Provide structured conflict explanations for UI
-
-3. Finalize schemas for the Dashboard wizard (request + response)
-   - `BulkDuplicateCheckRequest`
-   - `BulkPreviewResponse`
-   - `BulkCreateResponse`
-   - Conflict objects with standardized reasons/codes
-
-4. Finish `/admin/bulk-create`
-   - Add dry‑run support
-   - Add structured results mapping each input to creation success/failure
-   - Integrate Supabase logging (see next phase)
+**Still TODO in Phase 2:**
+1. **Variant customization in bulk flows**
+   - Honor per‑variant `quantity` and `price_override` values in `BulkCreateRequest.variants`.
+   - Decide and implement `compare_at_price` behavior for damaged variants.
+2. **Batch‑level dry‑run support**
+   - Add a full dry-run mode to `/admin/bulk-create` that simulates the entire batch with no Shopify mutations.
+3. **Error shaping and UX**
+   - Expand `BulkCreateResult.messages` (and/or add error codes) to make it easier for the Dashboard to surface clear, actionable feedback per row.
+4. **Logging integration**
+   - Once the Supabase migration for `damaged.creation_log` is in place, ensure all successes/failures from bulk creation are consistently recorded via `creation_log_service` and surfaced in the Dashboard.
 
 ---
 
@@ -346,17 +358,12 @@ These items are required to safely create canonical/damaged product pairs progra
 
 ---
 
-### 🗄️ Phase 4 — Logging & Observability (Upcoming)
-
-- Create Supabase table: `damaged.creation_log`
-- Record:
-  - operator ID
-  - canonical/damaged handles
-  - product IDs
-  - timestamps
-  - notes (warnings, conflicts, resolutions)
-- Add API endpoint: `GET /admin/creation-log`
-- Add Dashboard viewer page
+### 🗄️ Phase 4 — Logging & Observability (Backend + UI)
+- **Supabase migration (TODO):** create `damaged.creation_log` with fields for operator, handles, product IDs, timestamps, and notes (warnings/conflicts).
+- **Backend (partially done):**
+  - `creation_log_service.log_creation_event(...)` is called from the bulk‑creation path.
+  - `GET /admin/creation-log` returns recent creation-log entries for the Admin Dashboard.
+- **Dashboard (TODO):** add a viewer page that paginates and filters the creation log (by operator, date range, status, etc.).
 
 ---
 

@@ -8,6 +8,8 @@ from services.cron_service import reconcile_damaged_inventory
 from services.supabase_client import get_client
 from services.damaged_inventory_repo import list_view
 from services import product_service
+from .schemas import DuplicateCheckRequest, BulkCreateRequest, BulkCreateResult
+from services.creation_log_service import log_creation_event
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,14 +21,6 @@ def require_admin_token(x_admin_token: str = Header(default="")):
     if not ADMIN_API_TOKEN or x_admin_token != ADMIN_API_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
     return True
-
-class DuplicateCheckRequest(BaseModel):
-    canonical_handle: Optional[str] = None
-    canonical_title: Optional[str] = None
-    damaged_handle: Optional[str] = None
-    damaged_title: Optional[str] = None
-    isbn: Optional[str] = None
-    barcode: Optional[str] = None
 
 class BulkDuplicateCheckRequest(BaseModel):
     entries: list[DuplicateCheckRequest]
@@ -125,7 +119,7 @@ async def bulk_create(
     ok: bool = Depends(require_admin_token),
 ):
     """
-    Bulk Creation Wizard — execute creation of canonical + damaged products.
+    Bulk Creation Wizard — execute creation of damaged products only.
 
     Preconditions:
       - The Dashboard must have run /bulk-preview and shown operators all conflicts.
@@ -134,7 +128,7 @@ async def bulk_create(
     Behavior:
       - Phase 1: re-run check_damaged_duplicate() for every entry.
         * If ANY entry is not ok_to_create → abort the entire batch with 409.
-      - Phase 2: create all pairs via product_service.create_damaged_pair().
+      - Phase 2: create all damaged products via product_service.create_damaged_product_with_duplicate_check().
         * No redirects.
         * No Supabase inventory writes.
     """
@@ -187,43 +181,85 @@ async def bulk_create(
         )
 
     # -------------------------------
-    # Phase 2 — safe to create all pairs
+    # Phase 2 — safe to create all damaged products
     # -------------------------------
     results = []
 
     for item in prechecked:
         entry: DuplicateCheckRequest = item["entry"]
 
+        # Step B: ignore variants for now (wizard can add later), no dry-run
+        bulk_req = BulkCreateRequest(
+            canonical_handle=entry.canonical_handle,
+            canonical_title=entry.canonical_title,
+            damaged_handle=entry.damaged_handle,
+            damaged_title=entry.damaged_title,
+            isbn=entry.isbn,
+            barcode=entry.barcode,
+            variants=[],     # placeholder for future per-condition customization
+            dry_run=False,
+        )
+
         try:
-            created = await product_service.create_damaged_pair(
-                canonical_title=entry.canonical_title,
-                canonical_handle=entry.canonical_handle,
-                damaged_title=entry.damaged_title,
-                damaged_handle=entry.damaged_handle,
-                isbn=entry.isbn,
-                barcode=entry.barcode,
+            created: BulkCreateResult = (
+                await product_service.create_damaged_product_with_duplicate_check(
+                    bulk_req
+                )
             )
 
             results.append(
                 {
                     "requested": entry.model_dump(),
-                    "status": "created",
-                    "created": created,
+                    "status": created.status,
+                    "created": created.model_dump(),
                 }
             )
 
         except Exception as e:
+            err_msg = str(e)
             logger.warning(
                 "[Admin] bulk-create failed for canonical=%s damaged=%s err=%s",
                 entry.canonical_handle,
                 entry.damaged_handle,
-                str(e),
+                err_msg,
             )
+
+            # Build an error-type BulkCreateResult so we can log it
+            error_result = BulkCreateResult(
+                status="error",
+                damaged_product_id=None,
+                damaged_handle=entry.damaged_handle,
+                variants=[],
+                messages=[err_msg],
+            )
+
+            # Build the same BulkCreateRequest we would have sent on success
+            bulk_req = BulkCreateRequest(
+                canonical_handle=entry.canonical_handle,
+                canonical_title=entry.canonical_title,
+                damaged_handle=entry.damaged_handle,
+                damaged_title=entry.damaged_title,
+                isbn=entry.isbn,
+                barcode=entry.barcode,
+                variants=[],
+                dry_run=False,
+            )
+
+            try:
+                await log_creation_event(bulk_req, error_result, operator=None)
+            except Exception as log_err:
+                logger.warning(
+                    "[CreationLog] failed to log error event for canonical=%s damaged=%s: %s",
+                    entry.canonical_handle,
+                    entry.damaged_handle,
+                    log_err,
+                )
+
             results.append(
                 {
                     "requested": entry.model_dump(),
                     "status": "error",
-                    "error": str(e),
+                    "error": err_msg,
                 }
             )
 
@@ -233,6 +269,24 @@ async def bulk_create(
     )
 
     return JSONResponse({"results": results})
+
+@router.get("/creation-log")
+async def get_creation_log(
+    ok = Depends(require_admin_token),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """
+    Returns the most recent creation log entries.
+    """
+    from services.creation_log_service import fetch_creation_log
+
+    try:
+        rows = await fetch_creation_log(limit=limit)
+    except Exception as e:
+        logger.warning(f"[Admin] /admin/creation-log failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch creation log")
+
+    return {"data": rows, "meta": {"count": len(rows)}}
 
 @router.post("/reconcile")
 async def trigger_reconcile(ok = Depends(require_admin_token)):
