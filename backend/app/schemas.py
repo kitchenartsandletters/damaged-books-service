@@ -30,12 +30,6 @@ class CanonicalProductInfo(BaseModel):
 
 class DuplicateCheckRequest(BaseModel):
     canonical_handle: str
-    canonical_title: str
-    damaged_handle: str
-    damaged_title: str
-    isbn: Optional[str] = None
-    barcode: Optional[str] = None
-
 
 # ---------------------------------------------------------------------------
 # DUPLICATE CHECK: Response (structured conflicts)
@@ -63,8 +57,6 @@ class VariantSeed(BaseModel):
     condition: str                          # "light", "moderate", "heavy"
     quantity: Optional[int] = 0             # user optional input
     price_override: Optional[float] = None  # user may override %
-    compare_at_price: Optional[float] = None
-
 
 # ---------------------------------------------------------------------------
 # BULK CREATE: Request to /admin/bulk-create
@@ -72,15 +64,8 @@ class VariantSeed(BaseModel):
 
 class BulkCreateRequest(BaseModel):
     canonical_handle: str
-    canonical_title: str
-    damaged_handle: str
-    damaged_title: str
-    isbn: Optional[str] = None
-    barcode: Optional[str] = None
-
     variants: List[VariantSeed] = Field(default_factory=list)
     dry_run: bool = False
-
 
 # ---------------------------------------------------------------------------
 # BULK CREATE: Response to Admin Dashboard
