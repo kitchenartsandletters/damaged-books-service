@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime
 from services.shopify_client import shopify_client
-from services.supabase_client import supabase_client
+from services.supabase_client import get_client
 from backend.app.schemas import (
     DuplicateCheckRequest,
     DuplicateCheckResponse,
@@ -201,7 +201,7 @@ async def check_damaged_duplicate(
         try:
             # inventory_view includes fields:
             # product_id, handle, condition, available, etc.
-            supabase = await supabase_client.get_client()
+            supabase = await get_client()
             rows = (
                 supabase.table("inventory_view")
                 .select("*")
