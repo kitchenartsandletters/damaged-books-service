@@ -52,11 +52,13 @@ async def log_creation_event(
             # Join multiple messages into one text field for now
             message = "; ".join([m for m in result.messages if m])
 
+        # --- inside log_creation_event() ---
+
         payload = {
             "canonical_handle": request.canonical_handle,
             "canonical_title": request.canonical_title,
-            "damaged_handle": result.damaged_handle or request.damaged_handle,
-            "damaged_title": request.damaged_title,
+            "damaged_handle": result.damaged_handle,   # <-- corrected
+            "damaged_title": None,                     # <-- derived only inside product_service; not stored now
             "damaged_product_id": result.damaged_product_id,
             "variants_json": variants_payload,
             "operator": operator,
