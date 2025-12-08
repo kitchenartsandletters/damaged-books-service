@@ -1,79 +1,71 @@
 # Damaged Books Service (DBS)
+**Kitchen Arts & Letters – Used & Damaged Books Infrastructure**
 
-DBS is a FastAPI backend that powers Kitchen Arts & Letters’ **used/damaged book infrastructure**, including:
+DBS is the backend that powers the full lifecycle of **used/damaged books** across Shopify, Supabase, and internal Admin tooling. It provides:
 
-- Shopify webhook ingestion  
-- Damaged‑inventory normalization in Supabase  
-- Canonical‑SEO management  
-- Publish/unpublish automation  
-- Redirect rules  
-- Bulk damaged‑product creation  
-- Creation logging for Admin Dashboard  
+- Shopify webhook ingestion (inventory + products)
+- Damaged-inventory normalization in Supabase
+- Canonical SEO + metafield synchronization
+- Automatic publish/unpublish rules
+- Automatic redirect management
+- Bulk damaged-product creation (duplicate-safe)
+- Variant-level initialization of inventory
+- Full creation logging for auditing and Dashboard UI
 
-DBS is designed to work together with the **Webhook Gateway**, which provides replay, HMAC verification, and delivery resilience.
+DBS works together with the **Webhook Gateway**, which ensures replayability, HMAC safety, and delivery guarantees.
 
 ---
 
-# 1. High‑Level Architecture
+# 1. High-Level Architecture
 
-### 🔄 Webhook Flow (Inventory → DBS → Shopify)
-1. **Shopify emits** `inventory_levels/update`
-2. **Gateway receives**, verifies HMAC, forwards raw body + all headers
+## 🔄 Webhook Flow (Inventory → Gateway → DBS → Supabase → Shopify)
+1. Shopify sends `inventory_levels/update`
+2. Gateway verifies HMAC, forwards raw body + headers
 3. DBS:
-   - Verifies Shopify HMAC again (defense‑in‑depth)
-   - Resolves the inventory item → variant → product via **GraphQL-first**
-   - Hydrates product once (GraphQL) — no repeated fetches
+   - Re-verifies HMAC (defense-in-depth)
+   - Resolves variant + product using **GraphQL-first**  
+   - Hydrates product once (no double fetches)
    - Extracts damaged condition from `selectedOptions`
-   - Upserts into Supabase (`damaged.inventory`)
-   - Runs publish/unpublish rules
-   - Resolves/writes canonical metafield
-   - Ensures redirect correctness
+   - Normalizes condition (`light`, `moderate`, `heavy`)
+   - Upserts row into `damaged.inventory`
+   - Applies publish/unpublish rules
+   - Ensures canonical metafield correctness
+   - Updates/cleans redirect rules
 
-### 🧱 Core Internal Services
-- **shopify_client** — unified GraphQL-first Shopify admin API client  
-- **inventory_service** — reconciliation, availability, variant condition mapping  
-- **seo_service** — canonical resolution & metafield writes  
-- **redirect_service** — create/remove Shopify redirects  
-- **used_book_manager** — primary orchestrator for webhook + reconcile flows  
-- **product_service** — bulk creation, duplicate checks, damaged-product creation  
-- **creation_log_service** — structured logging of all bulk-creation events  
+The system is **idempotent**: replays and duplicate webhook bursts are safe.
 
 ---
 
-# 2. Supabase Schema (Damaged Inventory)
+# 2. Supabase Schema — `damaged`
 
-### Schema: `damaged`
-- **Table:** `inventory` — authoritative inventory row per variant  
-- **View:** `inventory_view` — adds computed fields, grouped status  
-- **Function:** `damaged_upsert_inventory` — SECURITY DEFINER UPSERT  
-- **Table:** `creation_log` — audit log of all damaged-product creation attempts  
+### Core Tables & Functions
 
-`creation_log` fields include:
-- id (PK)  
-- canonical_handle  
-- damaged_handle  
-- result_status  
-- product_id  
-- operator  
-- messages[]  
-- timestamp  
+| Name | Type | Purpose |
+|------|------|---------|
+| `inventory` | table | One authoritative row per damaged variant |
+| `inventory_view` | view | Joins metadata + condition + product info |
+| `creation_log` | table | Audit log of all product-creation attempts |
+| `damaged_upsert_inventory` | function | SECURITY DEFINER UPSERT |
+
+### Notes
+- Inventory is **only** written via the UPSERT function.
+- `creation_log` captures all success/error/dry-run events.
 
 ---
 
-# 3. Canonical SEO Strategy (Authoritative Specification)
+# 3. Canonical SEO Strategy
 
-Shopify **does not** store canonical URLs. The theme calculates `canonical_url` dynamically.  
-Therefore DBS uses **metafield redirection**:
-
-- Every damaged product receives metafield:  
-  ```
-  namespace: custom  
-  key: canonical_handle  
-  value: <canonical product.handle>  
-  ```
-- Theme override pattern:
+DBS enforces canonical accuracy with a metafield:
 
 ```
+namespace: custom
+key: canonical_handle
+value: <canonical.handle>
+```
+
+Themes override:
+
+```liquid
 {% if product.metafields.custom.canonical_handle %}
   <link rel="canonical" href="{{ routes.root_url }}/products/{{ product.metafields.custom.canonical_handle }}">
 {% else %}
@@ -81,98 +73,232 @@ Therefore DBS uses **metafield redirection**:
 {% endif %}
 ```
 
-DBS ensures this metafield is kept correct during:
-- webhook processing  
-- reconcile  
-- bulk creation  
+Redirects are automatically added/removed to maintain correctness.
 
 ---
 
-# 4. Damaged Product Creation System (Authoritative Rules)
+# 4. Damaged Product Creation — 2025 Authoritative Specification
 
-This is the **canonical specification** for how all damaged products are created.  
-It applies to:
-- Admin bulk-creation wizard  
-- Admin single-item creation  
-- Programmatic creation  
+Applies to API, wizard, and programmatic creation.
 
-## 4.1 Derivation Rules
+## 4.1 Title, Handle, Body
 
-### 📘 Title
+**Title**
 ```
 <canonical base title>: Damaged
 ```
-Base title = canonical title trimmed at first `: ; – — -`.
 
-### 🏷 Handle
+**Handle**
 ```
 <canonical.handle>-damaged
 ```
-No trimming or punctuation removal.  
-This rule is **absolute**.
 
-### 🧾 Body HTML (Fixed Copy)
-Exact required text:
+**Body HTML**
+A fixed block of damaged-book explanation (preserved in code).
 
-```
-We received some copies of this book which are less than perfect...
-[full block unchanged]
-```
-
-### Other inherited fields:
+**Inherited**
 - vendor  
 - product_type  
-- canonical SKU  
-- first image only  
-- canonical tags **+ "damaged"**  
-- SEO title = canonical_title + " (Damaged)"  
-- SEO description = fixed damaged preamble  
+- author SKU  
+- first image  
+- canonical tags + `"damaged"`  
+- SEO title: `<canonical> (Damaged)`  
+- SEO description: damaged preamble  
 
-### Not inherited:
+**Not inherited**
 - Collections  
-- SEO description from canonical  
-- Weight variations  
+- Weight  
 
 ---
 
-## 4.2 Variant-Level Rules
+# 4.2 Variant Rules (Always 3 variants)
 
-Each damaged product always contains **three variants**:
+| Condition | Default Discount | Title | Policy | Barcode | SKU |
+|----------|------------------|--------|--------|---------|-----|
+| light    | 15%              | Light Damage | deny | `<snake>_light` | canonical |
+| moderate | 30%              | Moderate Damage | deny | `<snake>_moderate` | canonical |
+| heavy    | 60%              | Heavy Damage | deny | `<snake>_heavy` | canonical |
 
-| Condition | Default Discount | Title | Inventory Policy | Barcode | SKU |
-|----------|------------------|--------|------------------|---------|-----|
-| light    | 15% off          | Light Damage | deny | `<snake(canonical_handle)>_light` | canonical |
-| moderate | 30% off          | Moderate Damage | deny | `<snake>_moderate` | canonical |
-| heavy    | 60% off          | Heavy Damage | deny | `<snake>_heavy` | canonical |
+Synthetic barcodes follow:
 
-### Synthetic barcodes (DBS 2025‑v2 rule)
 ```
 snake_case(canonical_handle) + "_" + condition_key
 ```
 
-### VariantSeed overrides
-Wizard may supply:
+**VariantSeed support**
 ```
-condition: "light" | "moderate" | "heavy"
-quantity: int
-price_override: float  # percentage off (0.25 = 25% off)
+condition, quantity, price_override
 ```
-
-**compare_at_price is ignored for now.**
-
-Quantities are **reported**, but not yet applied to Shopify inventory.
 
 ---
 
-# 5. Duplicate-Prevention & Bulk Creation (2025 Initiative)
+# 5. Inventory Initialization (Phase 2 – 2025-v3)
 
-DBS now provides a full duplicate-guarded product‑creation pipeline.
+After product creation:
+
+1. REST fetch variant → get `inventory_item_id`
+2. Set Shopify inventory via `inventory_levels/set.json`
+3. Shopify emits webhook
+4. DBS upserts into Supabase
+5. Publish Rule:
+   - If **any** variant has available > 0 → product is **published**
+   - If all variants = 0 → product becomes **unpublished**
+
+This sensitivity is **intentional**.
+
+## 5.1 Shopify Theme Integration (PDP Support for Damaged Books)
+
+The Damaged Books Service exposes variant-level condition identity (`light`, `moderate`, `heavy`) and ensures consistent barcoding, availability, and product publication rules. To surface this in the storefront, lightweight Shopify theme customizations provide:
+
+- Dynamic condition descriptions on damaged PDPs  
+- Full compatibility with variant selection (`variant-radios`)  
+- Stable behavior for all non-damaged products  
+- Zero interference with existing preorder, backorder, or event logic  
+
+These changes live entirely in Liquid plus a small JavaScript asset and require no build tools.
+
+### 5.1.1 Dynamic Damage-Condition Block
+
+On any product whose handle contains `-damaged`, the PDP injects:
+
+```liquid
+<div id="damage-condition-dynamic"
+     class="damage-condition-block"
+     style="display:none; margin-bottom: 1.5rem;"></div>
+```
+
+A JSON map of condition-to-description is provided via a snippet:
+
+```liquid
+<script id="damage-copy-json" type="application/json">
+{
+  "Light Damage": "...",
+  "Moderate Damage": "...",
+  "Heavy Damage": "..."
+}
+</script>
+```
+
+These descriptions match the internal KAL classification system and DBS condition rules.
+
+### 5.1.2 Behavior (Variant-Driven)
+
+When the customer selects a variant, the dynamic block updates:
+
+- `Light Damage` → light explanation  
+- `Moderate Damage` → moderate explanation  
+- `Heavy Damage` → heavy explanation  
+- Any non-damaged variant → hidden  
+
+The logic relies on the theme’s global `product:variant-change` event, which provides `event.detail.variant`.
+
+### 5.1.3 JavaScript: `damage-condition-dynamic.js`
+
+```javascript
+(function () {
+  const conditionCopyEl = document.getElementById("damage-copy-json");
+  if (!conditionCopyEl) return;
+
+  let conditionCopy = {};
+  try {
+    conditionCopy = JSON.parse(conditionCopyEl.textContent || "{}");
+  } catch (e) {
+    console.warn("Couldn't parse damage-condition JSON", e);
+  }
+
+  function updateDamageBlock(variant) {
+    const block = document.getElementById("damage-condition-dynamic");
+    if (!block) return;
+
+    const title = variant?.public_title;
+    if (!title || !conditionCopy[title]) {
+      block.style.display = "none";
+      block.innerHTML = "";
+      return;
+    }
+
+    block.innerHTML = conditionCopy[title];
+    block.style.display = "block";
+  }
+
+  document.addEventListener("product:variant-change", (event) => {
+    updateDamageBlock(event.detail.variant);
+  });
+
+  window.addEventListener("load", () => {
+    const el = document.querySelector("variant-radios script[type='application/json']");
+    if (!el) return;
+
+    try {
+      const variants = JSON.parse(el.textContent || "[]");
+      const firstVariant = variants.find(
+        v => v.id == ShopifyAnalytics.meta.selectedVariantId
+      );
+      if (firstVariant) updateDamageBlock(firstVariant);
+    } catch (e) {
+      console.warn("Damage initialization error:", e);
+    }
+  });
+})();
+```
+
+### 5.1.4 Stock Messaging Compatibility
+
+The PDP contains complex logic for preorders, out-of-print offers, Events, Hats/T-Shirts, GCP, and general books.  
+A Liquid normalization block ensures variant-level inventory (coming from DBS) produces correct messages without interfering with specialized product types.
+
+Rules:
+
+| Product Type | Behavior |
+|--------------|----------|
+| Damaged Books | Standard in-stock/backorder rules; description block handles UX |
+| Preorder | Always shows preorder message |
+| Past Out-of-Print | Always shows OOP message |
+| Hats/T-Shirts | Always show custom merch message |
+| Event | Sold-out → “event ended”; otherwise normal |
+| GCP | Never backordered |
+| General Books | Standard messaging |
+
+### 5.1.5 Safety Guarantees
+
+- Theme JS never blocks product-form behavior  
+- PDP remains stable if JSON missing or variant event fails  
+- No third-party dependencies  
+- Asset loads with `defer` to avoid render blocking  
+
+### 5.1.6 Why This Matters
+
+These theme enhancements complete the damaged-books pipeline:
+
+1. DBS normalizes condition + inventory  
+2. DBS controls publication state  
+3. Theme renders variant-specific UX  
+4. Gateway keeps Supabase synchronized  
+5. PDP always reflects the true state  
+
+This produces a self-healing, automated damaged-books experience with zero manual intervention.
 
 ---
 
-## 5.1 Request Models (Updated)
+# 6. Duplicate Prevention
 
-### BulkCreateRequest
+A canonical handle is rejected when:
+- canonical product missing  
+- damaged handle exists  
+- Shopify has suffixed collisions  
+- Supabase has inventory for this damaged root  
+- canonical/damaged collisions occur  
+
+Checks run on:
+- `/admin/check-duplicate`
+- `/admin/bulk-preview`
+- `/admin/bulk-create` (final guard)
+
+---
+
+# 7. Bulk Creation System
+
+## Request Model
 ```
 {
   canonical_handle: str,
@@ -184,182 +310,75 @@ DBS now provides a full duplicate-guarded product‑creation pipeline.
 }
 ```
 
-### Removed:
-❌ damaged_title  
-❌ damaged_handle  
-These are now always **derived automatically**.
+Removed:
+- damaged_title  
+- damaged_handle  
+
+Both are derived automatically.
+
+## Endpoints
+- `POST /admin/check-duplicate`
+- `POST /admin/bulk-preview`
+- `POST /admin/bulk-create`
+- `GET  /admin/creation-log`
+
+`bulk-create`:
+- enforces duplicate check  
+- derives handle/title  
+- creates product  
+- initializes inventory  
+- logs creation  
+- triggers publish/unpublish pipeline  
 
 ---
 
-## 5.2 Duplicate Rules (Strict)
+# 8. Creation Log
 
-A canonical_handle is considered conflicting if:
+Logs every creation attempt:
 
-- canonical product not found (forbidden)  
-- damaged handle already exists (or suffixed version exists)  
-- Supabase has inventory rows for same root-damaged handle  
-- Shopify has auto-suffix collisions  
-
-Wizard must correct conflicts before proceeding.
-
----
-
-## 5.3 Admin Endpoints (Updated)
-
-### `POST /admin/check-duplicate`
-Input: canonical metadata only  
-Output: conflict analysis, derived damaged handle, safety flag
-
-### `POST /admin/bulk-preview`
-Per-entry:
-- derive damaged handle  
-- run duplicate check  
-- report conflicts  
-
-### `POST /admin/bulk-create`
-For each safe entry:
-- derive titles/handles  
-- run duplicate guard again  
-- create damaged product via `create_damaged_pair()`  
-- record result in creation_log  
-
----
-
-# 6. product_service — Final Behavior Summary
-
-### `create_damaged_pair()`
-- Fetch canonical product  
-- Derive damaged title + handle  
-- Compute prices / overrides  
-- Build 3 variants  
-- Assign synthetic barcodes  
-- Set metafield `custom.canonical_handle`  
-- Create damaged product (Shopify REST)  
-- Return structured product info  
-
-### `create_damaged_product_with_duplicate_check()`
-- Run duplicate check  
-- Dry-run support  
-- Call create_damaged_pair  
-- Extract variant info  
-- Write creation_log entry  
-
-### `check_damaged_duplicate()`
-- Shopify canonical search (with suffix fallbacks)  
-- Shopify damaged search  
-- Supabase inventory collision check  
-- Returns conflict map + safe_to_create  
-
----
-
-# 7. Creation Log Subsystem
-
-### Purpose
-Record **every** creation attempt for operator auditing and Dashboard UI.
-
-### Logged fields (summarized)
-- operator (optional)  
+- status: `error`, `dry-run`, `created`
 - canonical_handle  
 - damaged_handle  
-- result_status (`error`, `dry-run`, `created`)  
-- variant summaries  
-- messages[]  
 - product_id  
-- created_at timestamp  
+- variants summary  
+- messages  
+- timestamp  
 
-### Endpoint
-```
-GET /admin/creation-log
-```
-
----
-
-# 8. Reconcile & Replay Pipeline
-
-### `/admin/reconcile`
-- Iterate inventory_view  
-- Fetch Shopify variant via GraphQL  
-- Preserve existing condition if Shopify omits it  
-- Upsert  
-- Reapply publish/unpublish + redirect rules  
-
-### Replay (Gateway)
-- Replays raw webhook  
-- DBS treats it as a new event  
-- HMAC restored, logic identical  
+Logging failures never break creation.
 
 ---
 
-# 9. Endpoints Summary
+# 9. Reconcile Flow
 
-(keep existing list from README, updated for new Admin endpoints:  
-check-duplicate, bulk-preview, bulk-create, creation-log)
+`/admin/reconcile`:
+- iterates Supabase inventory_view  
+- fetches Shopify variant  
+- normalizes condition  
+- upserts  
+- reapplies publication + metafields + redirects  
 
----
-
-# 10. Example curl for Bulk Creation
-
-### Preview (no mutations)
-```
-curl -X POST "$DBS/admin/bulk-preview" -H "X-Admin-Token:$TOKEN" -d '{
-  "entries": [
-    {
-      "canonical_handle": "the-last-unicorn",
-      "canonical_title": "The Last Unicorn",
-      "isbn": "9780999999999",
-      "barcode": "9780999999999",
-      "variants": [
-        {"condition": "light", "price_override": 0.25, "quantity": 3},
-        {"condition": "moderate", "quantity": 1}
-      ]
-    }
-  ]
-}'
-```
-
-### Create
-```
-curl -X POST "$DBS/admin/bulk-create" -H "X-Admin-Token:$TOKEN" -d '{
-  "entries": [...]
-}'
-```
+A full “repair + normalize” operation.
 
 ---
 
-# 11. E2E Testing Guide (Staging)
+# 10. E2E Testing
 
-### Pre-flight
-- Ensure Supabase migration for `damaged.creation_log` applied  
-- Ensure Shopify staging store accessible  
-- Ensure Webhook Gateway is live  
-
-### Test Steps
-1. Choose canonical product:
-   - handle: `the-last-unicorn`
-   - price: e.g. 40.00
-2. Run bulk-preview  
-3. Run bulk-create  
-4. Verify:
-   - Shopify product exists with correct title, handle, variants, prices  
-   - Synthetic barcodes correct  
-   - Supabase `inventory_view` empty (starts at 0 stock)  
-   - creation_log contains entry  
-   - Redirect NOT created (draft product)  
-5. Perform an inventory webhook:
-   - Set Light Damage stock to >0  
+1. Bulk-create a damaged product  
+2. Verify Shopify data (title, handle, variants, barcodes, prices)  
+3. Verify Supabase (`inventory_view`)  
+4. Verify creation_log  
+5. Modify inventory → trigger webhook  
 6. Confirm:
-   - Product is published  
-   - Redirect removed  
-   - canonical_handle metafield exists  
+   - Supabase updated  
+   - Product publishes/unpublishes correctly  
+   - Redirects & canonical metafields correct  
 
 ---
 
-# 12. Deployment
-
-(keep existing section)
+# 11. Deployment
+(Existing deployment instructions unchanged.)
 
 ---
 
 # License
-
-Private/internal.
+Internal / Proprietary

@@ -572,6 +572,12 @@ async def create_damaged_pair(
     # 5. Extract canonical fields (vendor, product_type, variants, images…)
     canonical_variant = (canonical.get("variants") or [{}])[0]
     canonical_price_raw = canonical_variant.get("price") or "0.00"
+
+    try:
+        canonical_price = float(canonical_price_raw)
+    except Exception:
+        canonical_price = 0.0
+
     canonical_sku = canonical_variant.get("sku")
     vendor = canonical.get("vendor")
     product_type = canonical.get("product_type")
