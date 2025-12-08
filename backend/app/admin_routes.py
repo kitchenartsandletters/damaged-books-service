@@ -105,145 +105,34 @@ async def bulk_preview(
 
 @router.post("/bulk-create")
 async def bulk_create(
-    payload: BulkDuplicateCheckRequest,
+    payload: BulkCreateRequest,
     ok: bool = Depends(require_admin_token),
 ):
     """
-    Bulk Creation Wizard — execute creation of damaged products only.
+    Damaged Books Service — single canonical → damaged product creator.
 
-    Preconditions:
-      - The Dashboard must have run /bulk-preview and shown operators all conflicts.
-      - Only entries whose preview.status == 'ok_to_create' should be sent here.
+    Input: BulkCreateRequest
+      - canonical_handle (required)
+      - canonical_title (optional hint; canonical title is ultimately pulled from Shopify)
+      - isbn / barcode (optional; currently not used for matching)
+      - variants: optional list of VariantSeed with:
+          * condition: "light" | "moderate" | "heavy"
+          * quantity: optional int (reported back as quantity_set; no inventory writes yet)
+          * price_override: optional float (fraction OFF; 0.25 == 25% off)
+      - dry_run: if True, run checks and return a preview without creating anything in Shopify.
 
     Behavior:
-      - Phase 1: re-run check_damaged_duplicate() for every entry.
-        * If ANY entry is not ok_to_create → abort the entire batch with 409.
-      - Phase 2: create all damaged products via product_service.create_damaged_product_with_duplicate_check().
-        * No redirects.
-        * No Supabase inventory writes.
+      - runs check_damaged_duplicate() using canonical_handle + derived damaged handle
+      - honors dry_run flag
+      - creates one damaged product with 3 condition variants
+      - logs to damaged.creation_log via creation_log_service.log_creation_event()
     """
 
-    # -------------------------------
-    # Phase 1 — global duplicate guard
-    # -------------------------------
-    prechecked: list[dict] = []
-    has_conflicts = False
+    # Delegate all business logic to the service layer
+    result: BulkCreateResult = await product_service.create_damaged_product_with_duplicate_check(payload)
 
-    for entry in payload.entries:
-        precheck = await product_service.check_damaged_duplicate(
-            canonical_handle=entry.canonical_handle
-        )
-        prechecked.append({"entry": entry, "precheck": precheck})
-
-        if precheck.get("status") != "ok_to_create":
-            has_conflicts = True
-
-    if has_conflicts:
-        conflicts = []
-        for item in prechecked:
-            status = item["precheck"].get("status")
-            if status != "ok_to_create":
-                conflicts.append(
-                    {
-                        "requested": item["entry"].model_dump(),
-                        "precheck": item["precheck"],
-                    }
-                )
-
-        logger.warning(
-            "[Admin] /admin/bulk-create ABORTED: %s conflicted entries",
-            len(conflicts),
-        )
-
-        # Hard guard: nothing is created if any entry is not ok_to_create
-        return JSONResponse(
-            status_code=409,
-            content={
-                "status": "conflict",
-                "message": "One or more entries are not ok_to_create; no products were created.",
-                "conflicts": conflicts,
-            },
-        )
-
-    # -------------------------------
-    # Phase 2 — safe to create all damaged products
-    # -------------------------------
-    results = []
-
-    for item in prechecked:
-        entry: DuplicateCheckRequest = item["entry"]
-
-        # Step B: ignore variants for now (wizard can add later), no dry-run
-        bulk_req = BulkCreateRequest(
-            canonical_handle=entry.canonical_handle,
-            variants=[],
-            dry_run=False,
-        )
-
-        try:
-            created: BulkCreateResult = (
-                await product_service.create_damaged_product_with_duplicate_check(
-                    bulk_req
-                )
-            )
-
-            results.append(
-                {
-                    "requested": entry.model_dump(),
-                    "status": created.status,
-                    "created": created.model_dump(),
-                }
-            )
-
-        except Exception as e:
-            err_msg = str(e)
-            logger.warning(
-                "[Admin] bulk-create failed for canonical=%s damaged=%s err=%s",
-                entry.canonical_handle,
-                entry.damaged_handle,
-                err_msg,
-            )
-
-            # Build an error-type BulkCreateResult so we can log it
-            error_result = BulkCreateResult(
-                status="error",
-                damaged_product_id=None,
-                damaged_handle=entry.damaged_handle,
-                variants=[],
-                messages=[err_msg],
-            )
-
-            # Build the same BulkCreateRequest we would have sent on success
-            bulk_req = BulkCreateRequest(
-                canonical_handle=entry.canonical_handle,
-                variants=[],
-                dry_run=False,
-            )
-
-            try:
-                await log_creation_event(bulk_req, error_result, operator=None)
-            except Exception as log_err:
-                logger.warning(
-                    "[CreationLog] failed to log error event for canonical=%s damaged=%s: %s",
-                    entry.canonical_handle,
-                    entry.damaged_handle,
-                    log_err,
-                )
-
-            results.append(
-                {
-                    "requested": entry.model_dump(),
-                    "status": "error",
-                    "error": err_msg,
-                }
-            )
-
-    logger.info(
-        "[Admin] /admin/bulk-create -> processed=%s",
-        len(results),
-    )
-
-    return JSONResponse({"results": results})
+    # Pydantic model → dict for JSONResponse
+    return JSONResponse(result.model_dump())
 
 @router.get("/creation-log")
 async def get_creation_log(

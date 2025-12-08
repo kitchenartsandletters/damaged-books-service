@@ -1,0 +1,9 @@
+{
+  "canonical_handle": "the-irish-bakery",
+  "variants": [
+    { "condition": "light", "quantity": 12 },
+    { "condition": "moderate", "quantity": 0 },
+    { "condition": "heavy", "quantity": 0 }
+  ],
+  "dry_run": false
+}
