@@ -1,5 +1,6 @@
 {
   "canonical_handle": "the-irish-bakery",
+  "canonical_title": "The Irish Bakery",
   "variants": [
     { "condition": "light", "quantity": 12 },
     { "condition": "moderate", "quantity": 0 },
