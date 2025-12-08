@@ -87,151 +87,115 @@ async def find_existing_by_handle(handle: str) -> dict | None:
 
 async def check_damaged_duplicate(
     canonical_handle: str,
-    damaged_handle: str
+    damaged_handle: str,
 ) -> dict:
     """
-    Comprehensive duplicate check used by the Admin Dashboard wizard.
+    NEW DUPLICATE-CHECK LOGIC (2025 REBUILD)
 
-    Returns a structured result:
-    {
-        "status": "ok" | "conflict",
-        "canonical_handle": "...",
-        "damaged_handle": "...",
-        "conflicts": {
-            "canonical_exists": bool,
-            "damaged_exists": bool,
-            "canonical_variants": [...],
-            "damaged_variants": [...],
-            "handle_collision": bool,
-        },
-        "existing_products": {
-            "canonical": <product or None>,
-            "damaged": <product or None>
-        },
-        "inventory_rows": [...],   # from Supabase
-        "safe_to_create": bool
-    }
+    Rules:
+      - Canonical product MUST exist → if missing → conflict
+      - Damaged product (auto handle: canonical + "-damaged") MUST NOT exist
+      - Any damaged inventory rows in Supabase → conflict
+      - canonical_exists is informational only, not a conflict
     """
+
+    logger.info(
+        f"[DuplicateCheck] Checking canonical='{canonical_handle}', "
+        f"damaged='{damaged_handle}'"
+    )
 
     result = {
         "status": "ok",
         "canonical_handle": canonical_handle,
         "damaged_handle": damaged_handle,
         "conflicts": {
-            "canonical_exists": False,
+            "canonical_missing": False,   # NEW field
             "damaged_exists": False,
-            "canonical_variants": [],
-            "damaged_variants": [],
-            "handle_collision": False,
+            "inventory_present": False,
         },
         "existing_products": {
             "canonical": None,
-            "damaged": None
+            "damaged": None,
         },
         "inventory_rows": [],
         "safe_to_create": True
     }
 
     try:
-        base_canonical = canonical_handle.lower().strip()
-        base_damaged = damaged_handle.lower().strip()
+        base_canonical = canonical_handle.strip().lower()
+        base_damaged   = damaged_handle.strip().lower()
 
-        # ------------------------------------------------------------------
-        # 1. Shopify canonical product search (including suffixes)
-        # ------------------------------------------------------------------
-        canonical_candidates = [
-            base_canonical,
-            f"{base_canonical}-1",
-            f"{base_canonical}-2",
-            f"{base_canonical}-3"
-        ]
+        # --------------------------------------------------------
+        # 1. FIND CANONICAL (REQUIRED)
+        # --------------------------------------------------------
+        found_canonical = await find_existing_by_handle(base_canonical)
 
-        found_canonical = None
-        for h in canonical_candidates:
-            resp = await shopify_client.get("products.json", query={"handle": h})
-            items = resp.get("body", {}).get("products", [])
-            if items:
-                found_canonical = items[0]
-                break
-
-        if found_canonical:
-            result["conflicts"]["canonical_exists"] = True
+        if not found_canonical:
+            logger.warning(
+                f"[DuplicateCheck] Canonical NOT FOUND for '{base_canonical}'"
+            )
+            result["conflicts"]["canonical_missing"] = True
+        else:
             result["existing_products"]["canonical"] = found_canonical
-            result["conflicts"]["canonical_variants"] = [
-                v.get("id") for v in found_canonical.get("variants", [])
-            ]
 
-        # ------------------------------------------------------------------
-        # 2. Shopify damaged product search (including suffixes)
-        # ------------------------------------------------------------------
-        damaged_candidates = [
-            base_damaged,
-            f"{base_damaged}-1",
-            f"{base_damaged}-2",
-            f"{base_damaged}-3"
-        ]
-
-        found_damaged = None
-        for h in damaged_candidates:
-            resp = await shopify_client.get("products.json", query={"handle": h})
-            items = resp.get("body", {}).get("products", [])
-            if items:
-                found_damaged = items[0]
-                break
+        # --------------------------------------------------------
+        # 2. FIND DAMAGED (MUST NOT EXIST)
+        # --------------------------------------------------------
+        found_damaged = await find_existing_by_handle(base_damaged)
 
         if found_damaged:
+            logger.warning(
+                f"[DuplicateCheck] Damaged ALREADY EXISTS for '{base_damaged}'"
+            )
             result["conflicts"]["damaged_exists"] = True
             result["existing_products"]["damaged"] = found_damaged
-            result["conflicts"]["damaged_variants"] = [
-                v.get("id") for v in found_damaged.get("variants", [])
-            ]
 
-        # ------------------------------------------------------------------
-        # 3. Handle collision check (canonical-damaged root mismatch)
-        # ------------------------------------------------------------------
-        if found_damaged and found_canonical:
-            result["conflicts"]["handle_collision"] = True
-
-        # ------------------------------------------------------------------
-        # 4. Supabase inventory check for damaged products sharing this root
-        # ------------------------------------------------------------------
+        # --------------------------------------------------------
+        # 3. SUPABASE INVENTORY CHECK (MUST BE CLEAN)
+        # --------------------------------------------------------
         try:
-            # inventory_view includes fields:
-            # product_id, handle, condition, available, etc.
-            supabase = get_client()
+            supabase = await get_client()
             rows = (
-                supabase.schema("damaged")
-                .from_("inventory_view")
+                supabase.table("inventory_view")
                 .select("*")
                 .ilike("handle", f"%{base_damaged}%")
                 .execute()
             )
-            result["inventory_rows"] = rows.data or []
-        except Exception as e:
-            logger.warning(f"[check_damaged_duplicate] Supabase inventory fetch failed: {e}")
+            inv = rows.data or []
+            result["inventory_rows"] = inv
 
-        # ------------------------------------------------------------------
-        # 5. Final resolution logic
-        # ------------------------------------------------------------------
+            if inv:
+                result["conflicts"]["inventory_present"] = True
+                logger.warning(
+                    "[DuplicateCheck] Inventory rows found for damaged root → conflict"
+                )
+        except Exception as e:
+            logger.warning(f"[DuplicateCheck] Supabase error: {e}")
+
+        # --------------------------------------------------------
+        # 4. FINAL RESOLUTION
+        # --------------------------------------------------------
         has_conflict = any([
-            result["conflicts"]["canonical_exists"],
-            result["conflicts"]["damaged_exists"],
-            result["conflicts"]["handle_collision"],
-            len(result["inventory_rows"]) > 0
+            result["conflicts"]["canonical_missing"],   # must NOT happen
+            result["conflicts"]["damaged_exists"],      # must NOT happen
+            result["conflicts"]["inventory_present"],   # must NOT happen
         ])
 
         if has_conflict:
             result["status"] = "conflict"
             result["safe_to_create"] = False
+            logger.info(f"[DuplicateCheck] → CONFLICT for '{damaged_handle}'")
+        else:
+            logger.info(f"[DuplicateCheck] → CLEAR TO CREATE '{damaged_handle}'")
 
         return result
 
     except Exception as e:
-        logger.error(f"[check_damaged_duplicate] Failure: {e}")
+        logger.error(f"[DuplicateCheck] Fatal error: {e}")
         return {
             "status": "error",
             "error": str(e),
-            "safe_to_create": False
+            "safe_to_create": False,
         }
 
 async def create_damaged_product_with_duplicate_check(
