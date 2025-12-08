@@ -361,8 +361,7 @@ async def create_damaged_product_with_duplicate_check(
     # -------------------------------------------------------
     result = BulkCreateResult(
         status="created",
-        damaged_product_id=damaged_id,
-        damaged_handle=damaged_handle,
+        damaged_product_id=str(damaged_id) if damaged_id is not None else None,
         variants=extracted_variants,
         messages=["Damaged product created successfully."],
     )
@@ -596,6 +595,9 @@ async def create_damaged_pair(
     # 7. Create damaged product
     resp = await shopify_client.post("products.json", data=payload)
     damaged = resp.get("body", {}).get("product")
+    # Normalise ID to string to prevent pydantic failures downstream
+    if damaged and "id" in damaged:
+        damaged["id"] = str(damaged["id"])
     if not damaged:
         raise RuntimeError(f"Failed to create damaged product {auto_damaged_handle}")
 

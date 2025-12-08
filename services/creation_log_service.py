@@ -59,7 +59,7 @@ async def log_creation_event(
             "canonical_title": request.canonical_title,
             "damaged_handle": result.damaged_handle,   # <-- corrected
             "damaged_title": None,                     # <-- derived only inside product_service; not stored now
-            "damaged_product_id": result.damaged_product_id,
+            "damaged_product_id": str(result.damaged_product_id) if result.damaged_product_id else None,
             "variants_json": variants_payload,
             "operator": operator,
             "dry_run": request.dry_run,
