@@ -154,7 +154,7 @@ async def check_damaged_duplicate(
         # 3. SUPABASE INVENTORY CHECK (MUST BE CLEAN)
         # --------------------------------------------------------
         try:
-            supabase = await get_client()
+            supabase = get_client()
             rows = (
                 supabase.table("inventory_view")
                 .select("*")
@@ -415,8 +415,6 @@ async def create_damaged_pair(
       - Inventory_policy: 'deny' (no overselling of damaged books)
     """
 
-    logger.info(f"[CreateDamagedPair] canonical={canonical_handle}, damaged={auto_damaged_handle}")
-
     # === AUTO-DERIVED DAMAGED TITLE & HANDLE (Option 1) ===
     # Trim canonical_title at first punctuation token and append ": Damaged"
     # 1. Fetch canonical product from Shopify
@@ -435,6 +433,9 @@ async def create_damaged_pair(
 
     # 4. Derive damaged handle
     auto_damaged_handle = f"{canonical_handle.strip().lower()}-damaged"
+
+    # Then log
+    logger.info(f"[CreateDamagedPair] canonical={canonical_handle}, damaged={auto_damaged_handle}")
 
     # 5. Extract canonical fields (vendor, product_type, variants, images…)
     canonical_variant = (canonical.get("variants") or [{}])[0]
