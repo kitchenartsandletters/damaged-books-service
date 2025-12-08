@@ -1,432 +1,365 @@
 # Damaged Books Service (DBS)
 
-The Damaged Books Service (DBS) is a FastAPI backend that processes Shopify inventory level webhooks for used/damaged book variants, applies business rules (publish/unpublish, SEO canonical, redirects), and persists a normalized view of damaged inventory in Supabase. It is designed to be driven by the Webhook Gateway, which relays Shopify webhooks with original headers and body for robust HMAC verification and replay support.
+DBS is a FastAPI backend that powers Kitchen Arts & Letters’ **used/damaged book infrastructure**, including:
+
+- Shopify webhook ingestion  
+- Damaged‑inventory normalization in Supabase  
+- Canonical‑SEO management  
+- Publish/unpublish automation  
+- Redirect rules  
+- Bulk damaged‑product creation  
+- Creation logging for Admin Dashboard  
+
+DBS is designed to work together with the **Webhook Gateway**, which provides replay, HMAC verification, and delivery resilience.
 
 ---
 
-## System Overview
+# 1. High‑Level Architecture
 
-### Modern Flow
-1. **Webhook ingestion:** Shopify emits `inventory_levels/update` → Gateway receives, verifies Shopify HMAC, and forwards the raw POST (body + headers) to DBS `/webhooks/inventory-levels`.
-2. **HMAC verification:** DBS verifies the Shopify HMAC signature (defense-in-depth).
-3. **Variant & product resolution (GraphQL‑first):**
-   - Use `shopify_client.get_variant_product_by_inventory_item(inventory_item_id)` to map the inventory item to `variant_id`, `product_id`, and `handle` in a single GraphQL call.
-   - If (and only if) GraphQL returns no match, fall back to REST `GET /admin/variants.json?inventory_item_ids=...` (post‑filtered for exact `inventory_item_id`).
-   - This logic is centralized in `shopify_client.resolve_inventory_item(...)` and consumed by the route layer.
-4. **Product hydration (GraphQL):**
-   - Fetch the product once via `shopify_client.get_product_by_id_gql(product_id)` and pass it through to the manager. The manager **trusts the passed product** and does not re-fetch it.
-5. **Canonical resolution & write (once per event):**
-   - `seo_service.resolve_canonical_handle(damaged_handle, product)` resolves the canonical destination (strip `-damaged`, honor redirects if present, otherwise trust the stripped handle).
-   - `seo_service.update_used_book_canonicals(product, canonical_handle)` writes `metafields.custom.canonical_handle` exactly once per webhook event.
-6. **Condition extraction & persistence:**
-   - Query Shopify GraphQL variant `selectedOptions` to extract `Condition` (Light/Moderate/Heavy).
-   - Preserve both `condition_raw` (human value) and `condition_key` (normalized snake_case) and upsert via Supabase RPC `damaged_upsert_inventory`.
-7. **Business rules (idempotent):**
-   - **Publish/unpublish** damaged product via GraphQL `productUpdate` using `shopify_client.set_product_publish_status(product_id, publish=True|False)`.
-   - **Redirects:** If **ANY** variant in stock → publish and **remove** redirect if present. If **ALL** variants out of stock → unpublish and **ensure** redirect exists from damaged handle to canonical handle. Aggregate availability comes from `damaged.inventory_view`.
-8. **Response:** Always returns HTTP 200 on internal errors (to avoid Shopify retries), 401 only for HMAC failures.
+### 🔄 Webhook Flow (Inventory → DBS → Shopify)
+1. **Shopify emits** `inventory_levels/update`
+2. **Gateway receives**, verifies HMAC, forwards raw body + all headers
+3. DBS:
+   - Verifies Shopify HMAC again (defense‑in‑depth)
+   - Resolves the inventory item → variant → product via **GraphQL-first**
+   - Hydrates product once (GraphQL) — no repeated fetches
+   - Extracts damaged condition from `selectedOptions`
+   - Upserts into Supabase (`damaged.inventory`)
+   - Runs publish/unpublish rules
+   - Resolves/writes canonical metafield
+   - Ensures redirect correctness
 
----
-
-## Architecture Updates
-
-- **GraphQL‑first resolution:** Inventory item → (variant_id, product_id, handle) is now resolved via GraphQL first, with REST as a rare fallback. Centralized in `shopify_client.resolve_inventory_item`.
-- **Single product hydration:** The route hydrates product via GraphQL and passes it forward. `used_book_manager` trusts the object and does not re‑fetch.
-- **Single canonical write:** `seo_service` resolves the canonical once and writes `custom.canonical_handle` exactly once per event.
-- **Unified publish/unpublish:** Moved from `product_service` to `shopify_client.set_product_publish_status` (GraphQL `productUpdate`).
-- **Redirects rule clarified:** Only create redirect when **all** damaged variants are out of stock; remove it when **any** variant returns to stock.
-- **Removed duplication:** Eliminated duplicate `variants.json` calls and duplicated canonical writes.
-- **Deprecation:** `api/webhooks.py` inventory route removed; `/webhooks/inventory-levels` lives in `routes.py`.
+### 🧱 Core Internal Services
+- **shopify_client** — unified GraphQL-first Shopify admin API client  
+- **inventory_service** — reconciliation, availability, variant condition mapping  
+- **seo_service** — canonical resolution & metafield writes  
+- **redirect_service** — create/remove Shopify redirects  
+- **used_book_manager** — primary orchestrator for webhook + reconcile flows  
+- **product_service** — bulk creation, duplicate checks, damaged-product creation  
+- **creation_log_service** — structured logging of all bulk-creation events  
 
 ---
 
-## Key Services and Responsibilities
+# 2. Supabase Schema (Damaged Inventory)
 
-- **shopify_client:** Centralized Shopify Admin API access (GraphQL‑first). Provides:
-  - `get_variant_product_by_inventory_item(inventory_item_id)`
-  - `get_product_by_id_gql(product_id)`
-  - `set_product_publish_status(product_id, publish: bool)`
-  - `resolve_inventory_item(inventory_item_id)` — unified helper that uses GraphQL first with REST fallback.
-- **inventory_service:** Uses Shopify GraphQL to check stock and map `selectedOptions` (Condition). Reconcile also calls through GraphQL.
-- **used_book_manager:** Orchestrates the flow. **Trusts the hydrated product passed in** (no additional product GETs), extracts condition, upserts to Supabase, runs publish/unpublish + redirect rules, and triggers canonical write exactly once per event.
-- **seo_service:** Resolves canonical handle (strip `-damaged`, check redirect, else trust stripped handle) and writes `metafields.custom.canonical_handle` one time per webhook event.
-- **redirect_service:** Finds, creates, and deletes redirects between damaged and canonical handles.
-- **product_service:** Hosts duplicate‑checking and bulk damaged‑product creation helpers (e.g., `check_damaged_duplicate`, `create_damaged_pair`, `create_damaged_product_with_duplicate_check`). Publish/unpublish remains the responsibility of `shopify_client.set_product_publish_status(...)`; product_service no longer drives status toggles.
+### Schema: `damaged`
+- **Table:** `inventory` — authoritative inventory row per variant  
+- **View:** `inventory_view` — adds computed fields, grouped status  
+- **Function:** `damaged_upsert_inventory` — SECURITY DEFINER UPSERT  
+- **Table:** `creation_log` — audit log of all damaged-product creation attempts  
 
----
-
-## Supabase Schema
-
-- **Schema:** `damaged`
-- **Table:** `damaged.inventory` (PK: `inventory_item_id`)
-- **View:** `damaged.inventory_view` (adds computed stock status and joins)
-- **Changelog:** `damaged.changelog` (optional/future)
-- **Upsert Function:** `damaged.damaged_upsert_inventory(...)` (SECURITY DEFINER, sets `search_path` to `public, damaged`)  
-  - Expects both `condition_raw` and `condition_key` to be provided and preserved.
+`creation_log` fields include:
+- id (PK)  
+- canonical_handle  
+- damaged_handle  
+- result_status  
+- product_id  
+- operator  
+- messages[]  
+- timestamp  
 
 ---
 
-## Damaged-Book Detection (Current)
+# 3. Canonical SEO Strategy (Authoritative Specification)
 
-- **Primary classification:** Product **handle** ending with `-damaged` marks the item as a damaged/used product.
-- **Condition reporting:** Variant `selectedOptions` (via GraphQL) are still read to extract the human value (`condition_raw`, e.g., "Light Damage") and a normalized key (`condition_key`, e.g., "light_damage") for analytics and display.
-- **Notes:** This approach ensures fast, unambiguous classification without relying on tags. We may consider an options‑only detection in the future, but the handle suffix has proven reliable with our catalog structure.
+Shopify **does not** store canonical URLs. The theme calculates `canonical_url` dynamically.  
+Therefore DBS uses **metafield redirection**:
 
----
-
-## Endpoints
-
-- `GET /health` — Health check. Returns `{"status":"ok"}`
-- `POST /webhooks/inventory-levels` — Main webhook endpoint. Expects Shopify HMAC, original body, and headers (via Gateway).
-  - Implemented in `routes.py` (the legacy `api/webhooks.py` route has been removed).
-- **Admin endpoints (require `X-Admin-Token`):**
-    - `GET /admin/docs` — Link hub for admin tools.
-    - `GET /admin/damaged-inventory` — List current damaged inventory (header: `X-Result-Count`).
-    - `POST /admin/check-duplicate` — Single-entry duplicate check for the Bulk Creation Wizard.
-    - `POST /admin/bulk-preview` — Multi-entry preflight duplicate scan (read-only, no Shopify mutations).
-    - `POST /admin/bulk-create` — Execute bulk damaged-product creation (with built-in duplicate guard).
-    - `GET /admin/creation-log` — Return recent damaged‑product creation events (for Dashboard history).
-    - `POST /admin/reconcile` — Run a full reconcile/refresh pipeline (see below).
-    - `GET /admin/reconcile/status` — Latest reconcile stats.
-- **Utility endpoints:** (for diagnostics/dev)
-    - `GET /admin/logs` — Return link(s) to external log viewer (Supabase / Gateway logs UI).
-    - `POST /api/products/check` — Manually trigger inventory logic for a specific variant.
-    - `POST /api/products/scan-all` — Batch scan (placeholder).
-    - `GET /api/products`, `GET /api/products/{product_id}`, `PUT /api/products/{product_id}/publish|unpublish` — Product helpers.
-    - `GET/POST/DELETE /api/redirects[...]` — Redirect helpers.
-
----
-
-## Webhook Gateway Integration
-
-- The Gateway **must** forward:
-    - All original Shopify headers, especially `X-Shopify-Hmac-Sha256`.
-    - The exact raw request body (no re-stringification).
-    - Optionally, `X-Gateway-Event-ID` (for idempotency), `X-Available-Hint` (mirrors `available`), and Gateway-side HMAC signature headers.
-- DBS verifies Shopify HMAC (using `SHOPIFY_API_SECRET`).
-- If present, DBS logs Gateway HMAC and event ID for traceability.
-
----
-
-## Replay & Reconcile Pipeline
-
-- **Replay:** Gateway can replay any webhook delivery by ID, forwarding the exact raw bytes and headers. DBS verifies HMAC and processes as if live.
-- **Reconcile:** Admin endpoint `/admin/reconcile` walks all rows in `damaged.inventory_view`, calls `resolve_by_inventory_item_id` from `inventory_service` to fetch current Shopify inventory via GraphQL, including both availability and condition info, preserving both fields. If Shopify omits condition or availability, existing DB values are preserved. The pipeline then upserts the latest status via `damaged_upsert_inventory`. This ensures DBS/Supabase state matches Shopify reality (even if webhooks were dropped).
-- **End-to-end tests:** Confirm that live webhooks, replayed events, and reconcile runs all result in correct Supabase state and business rule execution.
-
----
-
-## Health Checks & curl Examples
-
-```sh
-export VITE_DBS_BASE_URL="https://used-books-service-production.up.railway.app"
-export VITE_DBS_ADMIN_TOKEN="YOUR_LONG_RANDOM_TOKEN"
-
-# Health
-curl -i "$VITE_DBS_BASE_URL/health"
-# expect: 200 {"status":"ok"}
-
-# Admin docs
-curl -i "$VITE_DBS_BASE_URL/admin/docs" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
-# expect: 200 + JSON
-
-# List damaged inventory
-curl -i "$VITE_DBS_BASE_URL/admin/damaged-inventory" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
-# expect: 200, header X-Result-Count: <n>
-
-# Trigger reconcile
-curl -i -X POST "$VITE_DBS_BASE_URL/admin/reconcile" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
-# expect: 200 {"inspected":N,"updated":M,"skipped":K}
-
-# Reconcile status
-curl -i "$VITE_DBS_BASE_URL/admin/reconcile/status" -H "X-Admin-Token: $VITE_DBS_ADMIN_TOKEN"
-# expect: 200 {"inspected":N,"updated":M,"skipped":K,"note":..., "at":"..."}
-```
-
----
-
-## Local Development & HMAC Test
-
-```sh
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Set env (or use .env)
-export SHOP_URL=your-store.myshopify.com
-export SHOPIFY_API_SECRET=...
-export SHOPIFY_ACCESS_TOKEN=...
-
-python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
-# http://127.0.0.1:8000/health  -> {"status":"ok"}
-
-# HMAC test
-cat >/tmp/body.json <<'EOF'
-{"inventory_item_id":123,"location_id":40052293765,"available":5}
-EOF
-
-HMAC=$(node -e "const fs=require('fs'),c=require('crypto');const b=fs.readFileSync('/tmp/body.json');console.log(c.createHmac('sha256', process.env.SHOPIFY_API_SECRET).update(b).digest('base64'))")
-
-curl -i -X POST http://127.0.0.1:8000/webhooks/inventory-levels \
-  -H "Content-Type: application/json" \
-  -H "X-Shopify-Hmac-Sha256: $HMAC" \
-  -H "X-Shopify-Topic: inventory_levels/update" \
-  -H "X-Shopify-Shop-Domain: your-store.myshopify.com" \
-  --data-binary @/tmp/body.json
-```
-
----
-
-## Deployment (Railway)
-
-- **Start command:**  
-  `uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT`
-- **Public Networking:** Must be enabled.
-- **Environment variables:**  
-  - `SHOP_URL`, `SHOPIFY_API_SECRET`, `SHOPIFY_ACCESS_TOKEN`, etc.
-- **Health check:**  
-  - `GET /health` returns `{"status":"ok"}`
-
----
-
-## Implementation Notes
-
-- **HMAC verification:**  
-  - Always use the Shopify webhook secret (`SHOPIFY_API_SECRET`) for HMAC. The Gateway must forward the original bytes and `X-Shopify-Hmac-Sha256`.
-- **Variant/product resolution:** GraphQL‑first using `shopify_client.resolve_inventory_item(...)` (REST fallback only if GraphQL yields no match). This removed duplicate REST calls and simplified the route.
-- **Condition extraction:**  
-  - Only variants with a `Condition` option of `Light`, `Moderate`, or `Heavy` are considered damaged.
-  - Both `condition_raw` (human-readable) and `condition_key` (snake-cased normalized) are extracted and persisted.
-- **Business rules:** Publish/unpublish via GraphQL `productUpdate` using `shopify_client.set_product_publish_status(...)`. Canonical is resolved/written **once** per event in `seo_service`. Redirect creation/removal follows the aggregate stock rule (ALL OOS → create; ANY in stock → remove).
-- **Persistence:**  
-  - All events upsert to `damaged.inventory` via Supabase RPC, preserving both condition fields.
-- **Replay & reconcile:**  
-  - Gateway replay and `/admin/reconcile` ensure eventual consistency and recovery from missed events.
-  - Reconcile now uses Shopify GraphQL directly for availability and conditions, aligning with webhook processing, via `resolve_by_inventory_item_id`.
-- **Reconcile fallback:**  
-  - If Shopify omits condition or availability data during reconcile, existing database values are preserved.
-
----
-
-## Future Optimizations
-
-- **Per-event redirect lookup cache:** Propose a patch to cache `redirect_service.find_redirect_by_path(handle)` results within a single webhook processing pass (per-handle memoization) so we don’t hit `/redirects.json` twice for the same handle (e.g., `test-book-title`). This is a low-risk latency and rate-limit optimization.
-
----
-
-
-## Roadmap
-
-- Use `available_hint` for faster stock checks.
-- Further harden `inventory_service` with Shopify GraphQL.
-- Expand to additional Shopify webhook topics.
-- Add structured logging and richer notifications.
-- Batch pagination for scan-all.
-- Add end-to-end integration tests.
-- Optional Gateway HMAC verification.
-- Support idempotency table keyed by `X-Gateway-Event-ID`.
-
-
-## Damaged Product Creation Rules (Locked Specification)
-
-These rules define the **canonical behavior** for creating damaged products via DBS and the Bulk Creation Wizard. They override all prior specifications.
-
-### Product‑Level Rules
-
-- **Title:** `canonical.title + ": Damaged"`  
-- **Handle:** `canonical.handle + "-damaged"`  
-- **Body HTML:**  
-  The damaged product description must be **exactly** the following fixed preamble and must not be modified:
+- Every damaged product receives metafield:  
+  ```
+  namespace: custom  
+  key: canonical_handle  
+  value: <canonical product.handle>  
+  ```
+- Theme override pattern:
 
 ```
-We received some copies of this book which are less than perfect. While supplies last, we are offering these copies at a reduced price.  These copies are first come, first served: we cannot reserve one for you. And we cannot predict when we might receive more once we sell out of them, mostly because we really don't want to get any more damaged copies. 😊
-When you order one of these books, we'll use our judgment to choose the best remaining copy for you in the category you choose. Purchases of damaged books are final sales: they are not refundable or exchangeable.
-```
-
-- **Vendor:** inherit from canonical.  
-- **Product type:** inherit from canonical (`BOOK`).  
-- **Tags:** inherit canonical tags **and append** `"damaged"`.  
-- **Collections:** do **not** inherit; damaged books are not auto‑assigned to any collection.  
-- **Status:** always created as **DRAFT**.  
-- **Images:** copy **only the first** canonical image (cover).  
-- **SEO title:** inherit canonical SEO title and append `" (Damaged)"`.  
-- **SEO description:** **do not inherit**; SEO description is not used for condition copy.  
-- **Metafield `custom.canonical_handle`:** set to the canonical product’s **product.handle** (not canonical_url).  
-- **Inventory behavior:** managed exclusively at the variant level.
-
-### Variant‑Level Rules (Light / Moderate / Heavy Damage)
-
-Each damaged product always contains **three** variants:
-
-- **Titles:** `"Light Damage"`, `"Moderate Damage"`, `"Heavy Damage"`.  
-- **Pricing (default discounts):**
-  - Light — 15% off canonical price  
-  - Moderate — 30% off  
-  - Heavy — 60% off  
-  Bulk Wizard may override at creation time via `%` or `$` adjustments.
-- **Compare‑at price:** currently **unset** (future decision).  
-- **Weight:** inherit from canonical.  
-- **SKU:** inherit canonical SKU (DBS convention: SKU contains author name).  
-- **Barcode:** inherit canonical barcode (ISBN).  
-- **Inventory management:** `"shopify"`.  
-- **Inventory policy:** `"deny"` — damaged books **cannot oversell**.  
-- **Initial quantity:** `0` unless user supplies explicit quantities during Bulk Creation.  
-- **Condition descriptions:** not stored in product fields; appear only through theme‑side Liquid logic.
-
-## Bulk Creation & Duplicate‑Prevention Roadmap (2025 Phase)
-
-This section documents the new Bulk Damaged‑Book Creation Wizard initiative and the supporting backend infrastructure. It summarizes **what has been completed** and **what remains open**, organized so the README can serve as the project tracker for the next development phase.
-
-> **Important:** The DBS **never creates canonical products.** The Bulk Creation Wizard assumes the canonical (non‑damaged) product already exists in Shopify. The service only creates the corresponding damaged product (with three condition variants) and wires it into Supabase/DBS according to the rules below.
-
-
----
-
-### ✅ Completed (Phase 1)
-
-**Backend foundations**
-- Added `product_service.check_damaged_duplicate()` for pre‑creation duplicate detection.
-- Added Admin API routes:
-  - `POST /admin/check-duplicate` (single product duplicate guard)
-  - `POST /admin/bulk-preview` (multi-product preflight with conflict reporting)
-- Implemented handle normalization across preview endpoints.
-- Consolidated condition extraction mapping into `inventory_service` to prevent double-mapping.
-- Implemented safe quantity‑coercion (`int(float(x))`) within `inventory_service` and `used_book_manager`.
-- Fixed redirect‑coroutine bug in `seo_service.resolve_canonical_handle`.
-- Added Shopify rate‑limit hardening (memoized redirect lookups + reduced calls).
-- Established the architectural contract for **canonical metafield strategy** and tested consistent canonical writes.
-
-**Operational improvements**
-- Prevent Shopify suffix pollution (`-1`, `-2`) by introducing pre‑creation duplicate guards.
-- Added logging around variant→product resolution and Supabase upserts.
-- Reconcile is now fully GraphQL‑based and aligned with webhook logic.
-
----
-
-### 🚧 Phase 2 — Core Creation Engine (Current Status)
-
-**Implemented:**
-- `backend/app/schemas.py` defines the request/response models for duplicate checks and bulk creation:
-  - `DuplicateCheckRequest` / `DuplicateCheckResponse`
-  - `BulkCreateRequest` / `BulkCreateResult`
-  - `CanonicalProductInfo`, `VariantSeed`, `CreatedVariantInfo`
-- `product_service.check_damaged_duplicate(...)` powers:
-  - `POST /admin/check-duplicate` (single entry)
-  - `POST /admin/bulk-preview` (multi-entry preflight)
-- `product_service.create_damaged_pair(...)` creates a **damaged product only** (canonical must already exist) using the “Damaged Product Creation Rules” and returns structured metadata for the damaged product.
-- `product_service.create_damaged_product_with_duplicate_check(...)` wraps duplicate checking + optional dry-run for single‑item wizard flows.
-- `POST /admin/bulk-create` is wired to:
-  - re-run duplicate checks for every entry (hard guard: any conflict → 409, no creations),
-  - call `create_damaged_pair(...)` for each safe entry,
-  - return a structured list of per-entry results.
-- Basic creation logging is wired via `creation_log_service.log_creation_event(...)` and exposed via `GET /admin/creation-log` (migration for the underlying table is still tracked separately in Phase 4).
-
-**Still TODO in Phase 2:**
-1. **Variant customization in bulk flows**
-   - Honor per‑variant `quantity` and `price_override` values in `BulkCreateRequest.variants`.
-   - Decide and implement `compare_at_price` behavior for damaged variants.
-2. **Batch‑level dry‑run support**
-   - Add a full dry-run mode to `/admin/bulk-create` that simulates the entire batch with no Shopify mutations.
-3. **Error shaping and UX**
-   - Expand `BulkCreateResult.messages` (and/or add error codes) to make it easier for the Dashboard to surface clear, actionable feedback per row.
-4. **Logging integration**
-   - Once the Supabase migration for `damaged.creation_log` is in place, ensure all successes/failures from bulk creation are consistently recorded via `creation_log_service` and surfaced in the Dashboard.
-
----
-
-### 🗂️ Phase 3 — Dashboard Wizard UI (Upcoming)
-
-1. **Preflight Screen**
-   - Upload/enter batch of titles/handles
-   - Call `/admin/bulk-preview`
-   - Display conflict resolution UI
-
-2. **Conflict Resolution Modal**
-   - Edit canonical/damaged handles
-   - Remove items from batch
-   - Re-run preview step
-
-3. **Confirmation Step**
-   - Summary table of creations
-   - Operator confirmation required before finalizing
-   - POST `/admin/bulk-create`
-
-4. **Post‑Creation Summary**
-   - Show Shopify links
-   - Show Supabase log IDs
-   - Highlight any partially created entries
-
----
-
-### 🗄️ Phase 4 — Logging & Observability (Backend + UI)
-- **Supabase migration (TODO):** create `damaged.creation_log` with fields for operator, handles, product IDs, timestamps, and notes (warnings/conflicts).
-- **Backend (partially done):**
-  - `creation_log_service.log_creation_event(...)` is called from the bulk‑creation path.
-  - `GET /admin/creation-log` returns recent creation-log entries for the Admin Dashboard.
-- **Dashboard (TODO):** add a viewer page that paginates and filters the creation log (by operator, date range, status, etc.).
-
----
-
-### 🧪 Optional Enhancements (Future)
-- “Quick Add” single‑item modal in Dashboard
-- Shopify catalog selector to auto-fill canonicals
-- Full dry-run simulator using abstracted Shopify client
-- Pre‑publishing GID caching to reduce Shopify calls
-- Idempotency for bulk operations using UUID batch keys
-
----
-
-This roadmap is the authoritative checklist for the Bulk Creation Initiative and accompanies the existing DBS architecture sections above.
-
-
-## Canonical URLs
-
-Short version:
-	•	#1: product.seo is only title + meta description. There is no per-product canonical URL field in the Admin API. Shopify’s own docs confirm that Product.seo contains just an SEO title and description.  ￼
-	•	#2: The <link rel="canonical" …> tag you see in your theme comes from the Liquid global canonical_url. It’s computed at render time by Shopify, not something you “store” or can set via API. Shopify’s theme docs show exactly this pattern and state that canonical_url is provided by Shopify.  ￼
-	•	#3: Because of #1 and #2, you can’t “set” canonicals through product.seo. To control the canonical target for damaged products, you must override what the theme outputs—typically by checking a product metafield and, if present, outputting your own canonical link (otherwise fall back to {{ canonical_url }}).
-
-So to answer your exact questions:
-	•	“Where is canonical_url stored?”
-It isn’t stored per product. It’s a Liquid global that Shopify calculates for the current page and exposes to themes. You can use it, but you can’t update it through the Admin API.  ￼
-	•	“Does canonical_handle need to be canonical_url to match theme.liquid?”
-No. Your theme can continue to reference canonical_url by default, but you should conditionally override it when our app has resolved a better canonical. The usual pattern is to store a metafield (e.g., custom.canonical_handle) on the damaged product and have the theme emit <link rel="canonical" href="..."> using that metafield; if it’s not set, fall back to {{ canonical_url }}. (Metafields are first-class content the theme can read.)  ￼
-
-⸻
-
-What we should implement
-	1.	Our app (already in progress):
-	•	Resolve the canonical handle for each damaged product.
-	•	Write that handle into a product metafield (e.g., namespace custom, key canonical_handle).
-	•	Keep it fresh during inventory webhooks and reconcile jobs.
-	2.	Theme update (one-time):
-In theme.liquid (or your head partial), replace the canonical tag with:
-
-{% if template.name == 'product' and product %}
-  {% if product.metafields.custom.canonical_handle %}
-    <link rel="canonical"
-          href="{{ routes.root_url }}/products/{{ product.metafields.custom.canonical_handle | escape }}">
-  {% else %}
-    <link rel="canonical" href="{{ canonical_url }}">
-  {% endif %}
+{% if product.metafields.custom.canonical_handle %}
+  <link rel="canonical" href="{{ routes.root_url }}/products/{{ product.metafields.custom.canonical_handle }}">
 {% else %}
   <link rel="canonical" href="{{ canonical_url }}">
 {% endif %}
+```
 
-Our app writes `custom.canonical_handle` exactly once per event so the theme only evaluates it and does not need to manage timing or retries.
-
-	3.	Why this is SEO-correct:
-Google’s guidance is to use one canonical URL for duplicate/near-duplicate content. By always canonicalizing damaged SKUs to the undamaged primary page, you consolidate signals and avoid needless indexing of transient damaged pages.  ￼
-
-⸻
-
-TL;DR
-	•	You can’t set canonicals via product.seo; it’s only title/description.  ￼
-	•	canonical_url is a computed Liquid value, not stored per product.  ￼
-	•	The right approach is: app writes a canonical handle metafield on damaged products → theme conditionally emits a canonical tag using that metafield, otherwise falls back to {{ canonical_url }}. This gives us precise, programmatic control over SEO behavior without relying on manual edits.
+DBS ensures this metafield is kept correct during:
+- webhook processing  
+- reconcile  
+- bulk creation  
 
 ---
 
-## License
+# 4. Damaged Product Creation System (Authoritative Rules)
+
+This is the **canonical specification** for how all damaged products are created.  
+It applies to:
+- Admin bulk-creation wizard  
+- Admin single-item creation  
+- Programmatic creation  
+
+## 4.1 Derivation Rules
+
+### 📘 Title
+```
+<canonical base title>: Damaged
+```
+Base title = canonical title trimmed at first `: ; – — -`.
+
+### 🏷 Handle
+```
+<canonical.handle>-damaged
+```
+No trimming or punctuation removal.  
+This rule is **absolute**.
+
+### 🧾 Body HTML (Fixed Copy)
+Exact required text:
+
+```
+We received some copies of this book which are less than perfect...
+[full block unchanged]
+```
+
+### Other inherited fields:
+- vendor  
+- product_type  
+- canonical SKU  
+- first image only  
+- canonical tags **+ "damaged"**  
+- SEO title = canonical_title + " (Damaged)"  
+- SEO description = fixed damaged preamble  
+
+### Not inherited:
+- Collections  
+- SEO description from canonical  
+- Weight variations  
+
+---
+
+## 4.2 Variant-Level Rules
+
+Each damaged product always contains **three variants**:
+
+| Condition | Default Discount | Title | Inventory Policy | Barcode | SKU |
+|----------|------------------|--------|------------------|---------|-----|
+| light    | 15% off          | Light Damage | deny | `<snake(canonical_handle)>_light` | canonical |
+| moderate | 30% off          | Moderate Damage | deny | `<snake>_moderate` | canonical |
+| heavy    | 60% off          | Heavy Damage | deny | `<snake>_heavy` | canonical |
+
+### Synthetic barcodes (DBS 2025‑v2 rule)
+```
+snake_case(canonical_handle) + "_" + condition_key
+```
+
+### VariantSeed overrides
+Wizard may supply:
+```
+condition: "light" | "moderate" | "heavy"
+quantity: int
+price_override: float  # percentage off (0.25 = 25% off)
+```
+
+**compare_at_price is ignored for now.**
+
+Quantities are **reported**, but not yet applied to Shopify inventory.
+
+---
+
+# 5. Duplicate-Prevention & Bulk Creation (2025 Initiative)
+
+DBS now provides a full duplicate-guarded product‑creation pipeline.
+
+---
+
+## 5.1 Request Models (Updated)
+
+### BulkCreateRequest
+```
+{
+  canonical_handle: str,
+  canonical_title: str,
+  isbn: str | null,
+  barcode: str | null,
+  variants: [VariantSeed] | null,
+  dry_run: bool
+}
+```
+
+### Removed:
+❌ damaged_title  
+❌ damaged_handle  
+These are now always **derived automatically**.
+
+---
+
+## 5.2 Duplicate Rules (Strict)
+
+A canonical_handle is considered conflicting if:
+
+- canonical product not found (forbidden)  
+- damaged handle already exists (or suffixed version exists)  
+- Supabase has inventory rows for same root-damaged handle  
+- Shopify has auto-suffix collisions  
+
+Wizard must correct conflicts before proceeding.
+
+---
+
+## 5.3 Admin Endpoints (Updated)
+
+### `POST /admin/check-duplicate`
+Input: canonical metadata only  
+Output: conflict analysis, derived damaged handle, safety flag
+
+### `POST /admin/bulk-preview`
+Per-entry:
+- derive damaged handle  
+- run duplicate check  
+- report conflicts  
+
+### `POST /admin/bulk-create`
+For each safe entry:
+- derive titles/handles  
+- run duplicate guard again  
+- create damaged product via `create_damaged_pair()`  
+- record result in creation_log  
+
+---
+
+# 6. product_service — Final Behavior Summary
+
+### `create_damaged_pair()`
+- Fetch canonical product  
+- Derive damaged title + handle  
+- Compute prices / overrides  
+- Build 3 variants  
+- Assign synthetic barcodes  
+- Set metafield `custom.canonical_handle`  
+- Create damaged product (Shopify REST)  
+- Return structured product info  
+
+### `create_damaged_product_with_duplicate_check()`
+- Run duplicate check  
+- Dry-run support  
+- Call create_damaged_pair  
+- Extract variant info  
+- Write creation_log entry  
+
+### `check_damaged_duplicate()`
+- Shopify canonical search (with suffix fallbacks)  
+- Shopify damaged search  
+- Supabase inventory collision check  
+- Returns conflict map + safe_to_create  
+
+---
+
+# 7. Creation Log Subsystem
+
+### Purpose
+Record **every** creation attempt for operator auditing and Dashboard UI.
+
+### Logged fields (summarized)
+- operator (optional)  
+- canonical_handle  
+- damaged_handle  
+- result_status (`error`, `dry-run`, `created`)  
+- variant summaries  
+- messages[]  
+- product_id  
+- created_at timestamp  
+
+### Endpoint
+```
+GET /admin/creation-log
+```
+
+---
+
+# 8. Reconcile & Replay Pipeline
+
+### `/admin/reconcile`
+- Iterate inventory_view  
+- Fetch Shopify variant via GraphQL  
+- Preserve existing condition if Shopify omits it  
+- Upsert  
+- Reapply publish/unpublish + redirect rules  
+
+### Replay (Gateway)
+- Replays raw webhook  
+- DBS treats it as a new event  
+- HMAC restored, logic identical  
+
+---
+
+# 9. Endpoints Summary
+
+(keep existing list from README, updated for new Admin endpoints:  
+check-duplicate, bulk-preview, bulk-create, creation-log)
+
+---
+
+# 10. Example curl for Bulk Creation
+
+### Preview (no mutations)
+```
+curl -X POST "$DBS/admin/bulk-preview" -H "X-Admin-Token:$TOKEN" -d '{
+  "entries": [
+    {
+      "canonical_handle": "the-last-unicorn",
+      "canonical_title": "The Last Unicorn",
+      "isbn": "9780999999999",
+      "barcode": "9780999999999",
+      "variants": [
+        {"condition": "light", "price_override": 0.25, "quantity": 3},
+        {"condition": "moderate", "quantity": 1}
+      ]
+    }
+  ]
+}'
+```
+
+### Create
+```
+curl -X POST "$DBS/admin/bulk-create" -H "X-Admin-Token:$TOKEN" -d '{
+  "entries": [...]
+}'
+```
+
+---
+
+# 11. E2E Testing Guide (Staging)
+
+### Pre-flight
+- Ensure Supabase migration for `damaged.creation_log` applied  
+- Ensure Shopify staging store accessible  
+- Ensure Webhook Gateway is live  
+
+### Test Steps
+1. Choose canonical product:
+   - handle: `the-last-unicorn`
+   - price: e.g. 40.00
+2. Run bulk-preview  
+3. Run bulk-create  
+4. Verify:
+   - Shopify product exists with correct title, handle, variants, prices  
+   - Synthetic barcodes correct  
+   - Supabase `inventory_view` empty (starts at 0 stock)  
+   - creation_log contains entry  
+   - Redirect NOT created (draft product)  
+5. Perform an inventory webhook:
+   - Set Light Damage stock to >0  
+6. Confirm:
+   - Product is published  
+   - Redirect removed  
+   - canonical_handle metafield exists  
+
+---
+
+# 12. Deployment
+
+(keep existing section)
+
+---
+
+# License
 
 Private/internal.

@@ -5,11 +5,8 @@ from datetime import datetime
 from services.shopify_client import shopify_client
 from services.supabase_client import get_client
 from backend.app.schemas import (
-    DuplicateCheckRequest,
-    DuplicateCheckResponse,
     BulkCreateRequest,
     BulkCreateResult,
-    CanonicalProductInfo,
     VariantSeed,
     CreatedVariantInfo,
 )
@@ -201,9 +198,10 @@ async def check_damaged_duplicate(
         try:
             # inventory_view includes fields:
             # product_id, handle, condition, available, etc.
-            supabase = await get_client()
+            supabase = get_client()
             rows = (
-                supabase.table("inventory_view")
+                supabase.schema("damaged")
+                .from_("inventory_view")
                 .select("*")
                 .ilike("handle", f"%{base_damaged}%")
                 .execute()
@@ -258,74 +256,74 @@ async def create_damaged_product_with_duplicate_check(
             seed_by_condition[key] = seed
 
     # -------------------------------------------------------
-    # Step 1: Duplicate check
+    # Step 1: Compute auto_damaged_handle
+    # -------------------------------------------------------
+    # Damaged title is NOT derived here — handled exclusively inside create_damaged_pair()
+    auto_damaged_handle = f"{data.canonical_handle.strip().lower()}-damaged"
+
+    # -------------------------------------------------------
+    # Step 2: Duplicate check (use auto_damaged_handle)
     # -------------------------------------------------------
     dup_result = await check_damaged_duplicate(
         canonical_handle=data.canonical_handle,
-        damaged_handle=data.damaged_handle,
+        damaged_handle=auto_damaged_handle,
     )
 
     if dup_result.get("status") != "ok" or not dup_result.get("safe_to_create", False):
-        logger.warning(f"[BulkCreate] Conflict detected for {data.damaged_handle}")
+        logger.warning(f"[BulkCreate] Conflict detected for {auto_damaged_handle}")
 
         result = BulkCreateResult(
             status="error",
             damaged_product_id=None,
-            damaged_handle=data.damaged_handle,
+            damaged_handle=auto_damaged_handle,
             variants=[],
             messages=["Duplicate or conflict detected; creation aborted."],
         )
 
-        # Log (Option A — log everything)
         try:
-            await log_creation_event(data, result, operator=None)
+            await log_creation_event(data, result)
         except Exception as e:
             logger.warning(f"[CreationLog] Failed to write conflict log: {e}")
 
         return result
 
     # -------------------------------------------------------
-    # Step 2: Dry-run mode (no Shopify mutation)
+    # Step 3: Dry-run mode (no Shopify mutation)
     # -------------------------------------------------------
     if data.dry_run:
-        logger.info(f"[BulkCreate] Dry run for {data.damaged_handle}")
+        logger.info(f"[BulkCreate] Dry run for {auto_damaged_handle}")
 
         result = BulkCreateResult(
             status="dry-run",
             damaged_product_id=None,
-            damaged_handle=data.damaged_handle,
+            damaged_handle=auto_damaged_handle,
             variants=[],
             messages=["Dry run: no product created."],
         )
 
         try:
-            await log_creation_event(data, result, operator=None)
+            await log_creation_event(data, result)
         except Exception as e:
             logger.warning(f"[CreationLog] Failed to write dry-run log: {e}")
 
         return result
 
     # -------------------------------------------------------
-    # Step 3: Create damaged product via create_damaged_pair()
+    # Step 4: Create damaged product via create_damaged_pair()
     # DBS NEVER creates canonical products.
     # We pass variant seeds so create_damaged_pair can apply price overrides.
     # -------------------------------------------------------
     created = await create_damaged_pair(
-        canonical_title=data.canonical_title,
         canonical_handle=data.canonical_handle,
-        damaged_title=data.damaged_title,
-        damaged_handle=data.damaged_handle,
-        isbn=data.isbn,
-        barcode=data.barcode,
-        variants=data.variants,  # <-- NEW: pass VariantSeed list
+        variants=data.variants,
     )
 
     damaged = created.get("damaged", {}) or {}
     damaged_id = damaged.get("id")
-    damaged_handle = damaged.get("handle")
+    damaged_handle = auto_damaged_handle
 
     # -------------------------------------------------------
-    # Step 4: Extract CreatedVariantInfo[]
+    # Step 5: Extract CreatedVariantInfo[]
     # (Bulk-create does NOT mutate inventory yet → quantity_set reports the
     #  requested quantity but does not adjust Shopify inventory at this phase.)
     # -------------------------------------------------------
@@ -358,7 +356,7 @@ async def create_damaged_product_with_duplicate_check(
         )
 
     # -------------------------------------------------------
-    # Step 5: Build final BulkCreateResult
+    # Step 6: Build final BulkCreateResult
     # -------------------------------------------------------
     result = BulkCreateResult(
         status="created",
@@ -369,10 +367,10 @@ async def create_damaged_product_with_duplicate_check(
     )
 
     # -------------------------------------------------------
-    # Step 6: Write to creation_log (Option A: log all runs)
+    # Step 7: Write to creation_log (Option A: log all runs)
     # -------------------------------------------------------
     try:
-        await log_creation_event(data, result, operator=None)
+        await log_creation_event(data, result)
     except Exception as e:
         logger.warning(f"[CreationLog] Failed to write create log: {e}")
 
@@ -429,12 +427,7 @@ def is_damaged_handle(handle: str) -> bool:
 
 
 async def create_damaged_pair(
-    canonical_title: str,
     canonical_handle: str,
-    damaged_title: str,
-    damaged_handle: str,
-    isbn: str | None = None,
-    barcode: str | None = None,
     variants: list[VariantSeed] | None = None,
 ) -> dict:
     """
@@ -458,23 +451,31 @@ async def create_damaged_pair(
       - Inventory_policy: 'deny' (no overselling of damaged books)
     """
 
-    logger.info(f"[CreateDamagedPair] canonical={canonical_handle}, damaged={damaged_handle}")
+    logger.info(f"[CreateDamagedPair] canonical={canonical_handle}, damaged={auto_damaged_handle}")
 
-    # 1. Fetch canonical
+    # === AUTO-DERIVED DAMAGED TITLE & HANDLE (Option 1) ===
+    # Trim canonical_title at first punctuation token and append ": Damaged"
+    # 1. Fetch canonical product from Shopify
     canonical = await find_existing_by_handle(canonical_handle)
     if not canonical:
         raise RuntimeError(f"Canonical product not found for handle '{canonical_handle}'.")
 
+    # 2. Extract canonical title from Shopify
+    canonical_title = (canonical.get("title") or "").strip()
+
+    # 3. Derive damaged title by trimming canonical title at first punctuation
+    import re
+    m = re.split(r"[:;–—-]", canonical_title, maxsplit=1)
+    base_title = m[0].strip()
+    auto_damaged_title = f"{base_title}: Damaged"
+
+    # 4. Derive damaged handle
+    auto_damaged_handle = f"{canonical_handle.strip().lower()}-damaged"
+
+    # 5. Extract canonical fields (vendor, product_type, variants, images…)
     canonical_variant = (canonical.get("variants") or [{}])[0]
     canonical_price_raw = canonical_variant.get("price") or "0.00"
-
-    try:
-        canonical_price = float(canonical_price_raw)
-    except Exception:
-        canonical_price = 0.0
-
-    canonical_barcode = canonical_variant.get("barcode")  # no longer used directly
-    canonical_sku = canonical_variant.get("sku")          # DBS rule: sku = author; we inherit this
+    canonical_sku = canonical_variant.get("sku")
     vendor = canonical.get("vendor")
     product_type = canonical.get("product_type")
     canonical_tags = canonical.get("tags", [])
@@ -549,8 +550,8 @@ async def create_damaged_pair(
     # 6. Build product payload
     payload = {
         "product": {
-            "title": damaged_title,
-            "handle": damaged_handle,
+            "title": auto_damaged_title,
+            "handle": auto_damaged_handle,
             "status": "draft",  # created as draft; publishing is handled elsewhere
             "body_html": damaged_preamble,
             "vendor": vendor,
@@ -584,9 +585,9 @@ async def create_damaged_pair(
     resp = await shopify_client.post("products.json", data=payload)
     damaged = resp.get("body", {}).get("product")
     if not damaged:
-        raise RuntimeError(f"Failed to create damaged product {damaged_handle}")
+        raise RuntimeError(f"Failed to create damaged product {auto_damaged_handle}")
 
-    logger.info(f"[CreateDamagedPair] Created damaged id={damaged.get('id')}")
+    logger.info(f"[CreateDamagedPair] Created damaged id={damaged.get('id')} handle={auto_damaged_handle}")
 
     return {"canonical": canonical, "damaged": damaged}
 

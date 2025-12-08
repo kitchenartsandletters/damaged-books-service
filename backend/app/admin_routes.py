@@ -63,12 +63,7 @@ async def check_duplicate(
     """
 
     result = await product_service.check_damaged_duplicate(
-        canonical_handle=payload.canonical_handle,
-        canonical_title=payload.canonical_title,
-        damaged_handle=payload.damaged_handle,
-        damaged_title=payload.damaged_title,
-        isbn=payload.isbn,
-        barcode=payload.barcode,
+        canonical_handle=payload.canonical_handle
     )
 
     logger.info(
@@ -97,12 +92,7 @@ async def bulk_preview(
     results = []
     for entry in payload.entries:
         result = await product_service.check_damaged_duplicate(
-            canonical_handle=entry.canonical_handle,
-            canonical_title=entry.canonical_title,
-            damaged_handle=entry.damaged_handle,
-            damaged_title=entry.damaged_title,
-            isbn=entry.isbn,
-            barcode=entry.barcode,
+            canonical_handle=entry.canonical_handle
         )
         results.append(result)
 
@@ -141,12 +131,7 @@ async def bulk_create(
 
     for entry in payload.entries:
         precheck = await product_service.check_damaged_duplicate(
-            canonical_handle=entry.canonical_handle,
-            canonical_title=entry.canonical_title,
-            damaged_handle=entry.damaged_handle,
-            damaged_title=entry.damaged_title,
-            isbn=entry.isbn,
-            barcode=entry.barcode,
+            canonical_handle=entry.canonical_handle
         )
         prechecked.append({"entry": entry, "precheck": precheck})
 
@@ -191,12 +176,7 @@ async def bulk_create(
         # Step B: ignore variants for now (wizard can add later), no dry-run
         bulk_req = BulkCreateRequest(
             canonical_handle=entry.canonical_handle,
-            canonical_title=entry.canonical_title,
-            damaged_handle=entry.damaged_handle,
-            damaged_title=entry.damaged_title,
-            isbn=entry.isbn,
-            barcode=entry.barcode,
-            variants=[],     # placeholder for future per-condition customization
+            variants=[],
             dry_run=False,
         )
 
@@ -236,11 +216,6 @@ async def bulk_create(
             # Build the same BulkCreateRequest we would have sent on success
             bulk_req = BulkCreateRequest(
                 canonical_handle=entry.canonical_handle,
-                canonical_title=entry.canonical_title,
-                damaged_handle=entry.damaged_handle,
-                damaged_title=entry.damaged_title,
-                isbn=entry.isbn,
-                barcode=entry.barcode,
                 variants=[],
                 dry_run=False,
             )
