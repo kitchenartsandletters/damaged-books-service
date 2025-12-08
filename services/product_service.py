@@ -375,6 +375,7 @@ async def create_damaged_product_with_duplicate_check(
     result = BulkCreateResult(
         status="created",
         damaged_product_id=str(damaged_id) if damaged_id is not None else None,
+        damaged_handle=damaged_handle,
         variants=extracted_variants,
         messages=["Damaged product created successfully."],
     )
