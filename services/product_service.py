@@ -65,25 +65,59 @@ def _normalize_condition_from_title(title: str | None) -> str | None:
 
 async def find_existing_by_handle(handle: str) -> dict | None:
     """
-    Return first Shopify product that matches handle (exact) OR Shopify's auto-suffixed variants
-    such as '-1', '-2', etc.
+    Return first Shopify product that looks like it matches the given handle.
+
+    Strategy:
+      1. Try the exact handle and a few auto-suffix candidates: base, base-1, base-2, base-3.
+      2. If nothing found, fall back to a brute-force scan of up to 250 products and
+         return the first whose handle == base or startswith(f"{base}-").
     """
     try:
-        # Query Shopify for products with the given handle or auto-suffixed versions
-        base = handle.lower().strip()
+        base = (handle or "").strip().lower()
+
+        # ----------------------------------------------------
+        # Phase 1: direct handle candidates (base, base-1, ...)
+        # ----------------------------------------------------
         suffix_candidates = [base, f"{base}-1", f"{base}-2", f"{base}-3"]
         for h in suffix_candidates:
             resp = await shopify_client.get("products.json", query={"handle": h})
             products = resp.get("body", {}).get("products", [])
             if products:
                 return products[0]
+
+        # ----------------------------------------------------
+        # Phase 2: brute-force fallback (up to 250 products)
+        # ----------------------------------------------------
+        # Some stores / API behaviors ignore the ?handle= filter or don't surface
+        # the product via that parameter. As a safety net, load a page of products
+        # and match by handle prefix.
+        resp = await shopify_client.get("products.json", query={"limit": 250})
+        all_products = resp.get("body", {}).get("products", []) or []
+
+        for p in all_products:
+            h = (p.get("handle") or "").strip().lower()
+            if h == base or h.startswith(f"{base}-"):
+                logger.info(
+                    "[find_existing_by_handle] Fallback match: requested=%s matched=%s",
+                    base,
+                    h,
+                )
+                return p
+
+        # Nothing found
+        logger.info(
+            "[find_existing_by_handle] No product found for handle base='%s' after suffix + fallback scan",
+            base,
+        )
         return None
+
     except Exception as e:
-        logger.warning(f"[DuplicateCheck] Failed finding existing product by handle={handle}: {e}")
+        logger.warning(
+            "[DuplicateCheck] Failed finding existing product by handle=%s: %s",
+            handle,
+            e,
+        )
         return None
-
-
-
 
 async def check_damaged_duplicate(
     canonical_handle: str,
@@ -156,7 +190,8 @@ async def check_damaged_duplicate(
         try:
             supabase = get_client()
             rows = (
-                supabase.table("inventory_view")
+                supabase.schema("damaged")
+                .table("inventory_view")
                 .select("*")
                 .ilike("handle", f"%{base_damaged}%")
                 .execute()
@@ -443,7 +478,17 @@ async def create_damaged_pair(
     canonical_sku = canonical_variant.get("sku")
     vendor = canonical.get("vendor")
     product_type = canonical.get("product_type")
-    canonical_tags = canonical.get("tags", [])
+
+    # Shopify REST returns tags as a comma-separated string.
+    raw_tags = canonical.get("tags") or ""
+    if isinstance(raw_tags, str):
+        canonical_tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+    elif isinstance(raw_tags, list):
+        # Just in case, be defensive if we ever see a list.
+        canonical_tags = [str(t).strip() for t in raw_tags if str(t).strip()]
+    else:
+        canonical_tags = []
+
     canonical_images = canonical.get("images", [])
     canonical_image_src = canonical_images[0]["src"] if canonical_images else None
 
