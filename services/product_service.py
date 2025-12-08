@@ -1,6 +1,7 @@
 # services/product_service.py
 
 import logging
+import os
 from datetime import datetime
 from services.shopify_client import shopify_client
 from services.supabase_client import get_client
@@ -13,6 +14,18 @@ from backend.app.schemas import (
 from services.creation_log_service import log_creation_event
 
 logger = logging.getLogger(__name__)
+
+# Shopify location used when setting damaged inventory levels.
+# Preferred: DBS_SHOPIFY_LOCATION_ID (service-specific); fallback: SHOPIFY_LOCATION_ID.
+_SHOPIFY_LOCATION_ID_RAW = os.getenv("DBS_SHOPIFY_LOCATION_ID") or os.getenv("SHOPIFY_LOCATION_ID")
+try:
+    SHOPIFY_LOCATION_ID: int | None = int(_SHOPIFY_LOCATION_ID_RAW) if _SHOPIFY_LOCATION_ID_RAW else None
+except ValueError:
+    SHOPIFY_LOCATION_ID = None
+    logger.warning(
+        "[InventoryUpdate] Invalid DBS_SHOPIFY_LOCATION_ID/SHOPIFY_LOCATION_ID value: %r",
+        _SHOPIFY_LOCATION_ID_RAW,
+    )
 
 # ---------------------------------------------------------------------------
 # Variant helpers & condition metadata
@@ -367,7 +380,15 @@ async def create_damaged_product_with_duplicate_check(
     )
 
     # -------------------------------------------------------
-    # Step 7: Write to creation_log (Option A: log all runs)
+    # Step 7: Initial inventory sync (best-effort)
+    # -------------------------------------------------------
+    try:
+        await _apply_initial_inventory(result)
+    except Exception as e:
+        logger.warning("[InventoryUpdate] Unexpected error during initial sync: %s", e)
+
+    # -------------------------------------------------------
+    # Step 8: Write to creation_log (Option A: log all runs)
     # -------------------------------------------------------
     try:
         await log_creation_event(data, result)
@@ -375,6 +396,80 @@ async def create_damaged_product_with_duplicate_check(
         logger.warning(f"[CreationLog] Failed to write create log: {e}")
 
     return result
+
+async def _apply_initial_inventory(result: BulkCreateResult) -> None:
+    """
+    Best-effort initial inventory sync for newly created damaged variants.
+
+    Rules:
+      - Only runs when SHOPIFY_LOCATION_ID is configured.
+      - For each CreatedVariantInfo with quantity_set > 0:
+          1. Fetch variant to get inventory_item_id.
+          2. POST inventory_levels/set.json with { location_id, inventory_item_id, available }.
+      - Errors are logged and swallowed; never raise.
+    """
+    if SHOPIFY_LOCATION_ID is None:
+        logger.warning(
+            "[InventoryUpdate] SHOPIFY_LOCATION_ID not configured; "
+            "skipping damaged inventory initialization."
+        )
+        return
+
+    location_id = SHOPIFY_LOCATION_ID
+
+    for v in result.variants or []:
+        try:
+            qty = v.quantity_set or 0
+            if qty <= 0:
+                continue
+
+            variant_id = v.variant_id
+            if not variant_id:
+                logger.warning("[InventoryUpdate] Missing variant_id in CreatedVariantInfo; skipping.")
+                continue
+
+            # 1) Fetch variant to obtain inventory_item_id
+            resp = await shopify_client.get(f"variants/{variant_id}.json")
+            variant_obj = resp.get("body", {}).get("variant") or {}
+            inventory_item_id = variant_obj.get("inventory_item_id")
+
+            if not inventory_item_id:
+                logger.warning(
+                    "[InventoryUpdate] No inventory_item_id for variant %s; skipping.",
+                    variant_id,
+                )
+                continue
+
+            # 2) Call inventory_levels/set.json to set available quantity at this location
+            payload = {
+                "location_id": location_id,
+                "inventory_item_id": int(inventory_item_id),
+                "available": int(qty),
+            }
+
+            inv_resp = await shopify_client.post("inventory_levels/set.json", data=payload)
+            status = inv_resp.get("status")
+            if status and status >= 400:
+                logger.warning(
+                    "[InventoryUpdate] Shopify responded with status=%s for variant %s payload=%s",
+                    status,
+                    variant_id,
+                    payload,
+                )
+            else:
+                logger.info(
+                    "[InventoryUpdate] Set damaged variant %s inventory to %s at location %s",
+                    variant_id,
+                    qty,
+                    location_id,
+                )
+
+        except Exception as e:
+            logger.warning(
+                "[InventoryUpdate] Failed to set inventory for variant_id=%s: %s",
+                getattr(v, "variant_id", None),
+                e,
+            )
 
 def parse_damaged_handle(handle: str) -> tuple[str, str]:
     """
