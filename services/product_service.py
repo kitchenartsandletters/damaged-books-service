@@ -341,10 +341,12 @@ async def create_damaged_product_with_duplicate_check(
                 except Exception:
                     qty = 0
 
+        variant_id_raw = v.get("id")
+
         extracted_variants.append(
             CreatedVariantInfo(
                 condition=title,
-                variant_id=v.get("id"),
+                variant_id=str(variant_id_raw) if variant_id_raw is not None else None,
                 quantity_set=qty,
                 price=float(v.get("price") or 0),
                 sku=v.get("sku"),
