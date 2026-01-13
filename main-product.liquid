@@ -1,9 +1,27 @@
+{% assign blacklisted_product_ids = "7154358124677,7104556859525,7195458633861,7195458601093,7195457749125,7195458338949,7195457159301" | split: "," %}
+{% assign blacklisted_barcodes = "JCA5VOL,9782017266211" | split: "," %}
+
 {% comment %}theme-check-disable TemplateLength{% endcomment %}
 {%- liquid
     assign current_variant = product.selected_or_first_available_variant
     assign product_form_id = 'product-form-' | append: section.id
     assign current_date = 'now' | date: '%Y%m%d'
     assign pub_date = product.metafields.custom.pub_date.value | date: '%Y%m%d'
+
+    assign current_qty = current_variant.inventory_quantity | default: 0
+    assign v_available = current_variant.available
+
+    assign in_preorder_collection = false
+    assign in_pastop_collection = false
+
+    for c in product.collections
+        if c.title == 'Preorder'
+        assign in_preorder_collection = true
+        endif
+        if c.title == 'Past Out-of-Print Offers'
+        assign in_pastop_collection = true
+        endif
+    endfor
 -%}
 
 {% if product.type == 'Event' %}
@@ -116,14 +134,6 @@
                                         assign complementary_products_block_absent = true
                                     -%}
 
-                                    {%- assign has_damaged_block = false -%}
-                                    {%- for _b in section.blocks -%}
-                                    {%- if _b.type == 'damaged-book' -%}
-                                        {%- assign has_damaged_block = true -%}
-                                        {%- break -%}
-                                    {%- endif -%}
-                                    {%- endfor -%}
-
                                     {%- case block.type -%}
                                         {%- when '@app' -%}
                                             <div class="product-single__box__block product-single__box__block--{{ block.type }}" {{ block.shopify_attributes }}>
@@ -145,7 +155,7 @@
                                             </style>
 {% comment %}Capsule Icons{% endcomment %}
                                               <div class="capsule">
-  {% assign languageValidations = "English,Faroese,French,German,Italian,Japanese,Korean,Portuguese,Spanish,Thai,Dutch" | split: ',' %}
+  {% assign languageValidations = "Arabic,Catalan,Chinese,Danish,Dutch,English,Faroese,French,German,Greek,Italian,Japanese,Korean,Portuguese,Serbian,Spanish,Swedish,Tagalog,Thai" | split: ',' %}
   
   {% assign symbols = "Vegan,Vegetarian,Gluten-Free,bookplate,signed,Language,preorder,waxmannom,waxmanwin" | split: ',' %}
   {% assign colors = "#32a852,#7df59d,#BF40BF,#ff9933,#3366cc,#0047AB,#007474,#00008f,#3232a5" | split: ',' %}
@@ -312,39 +322,86 @@
                                                 %}
                                             </div>
 
-                                        {%- when 'damaged-book' -%}
-
-                                          <div class="product-single__box__block product-single__box__block--m-12 product-single__box__block--{{ block.type }}" {{ block.shopify_attributes }}>
-                                            {% render 'damaged-book-snippet' %}
-                                          </div>
-
 {%- when 'description' -%}
 
-    {%- if section.settings.damaged_fallback_enable and has_damaged_block == false -%}
-        <div class="product-single__box__block product-single__box__block--m-12 product-single__box__block--damaged-fallback">
-        {% render 'damaged-book-snippet' %}
-        </div>
-    {%- endif -%}
+{% if product.metafields.custom.canonical_handle %}
+  {% assign canon_handle = product.metafields.custom.canonical_handle.value | strip %}
+  <p class="damaged-canonical-backlink" style="margin-bottom: 0.5rem;">
+    <a href="/products/{{ canon_handle }}" style="text-decoration: underline; color:#00008f;">
+      If you would like to learn more about this title, you may do so here.
+    </a>
+  </p>
+
+  <p
+    id="damage-discount-dynamic"
+    class="damage-discount-block"
+    style="display:none; margin-bottom: 1rem;"
+  ></p>
+{% endif %}
 
     <div class="product-single__box__block product-single__box__block--{{ block.type }}" {{ block.shopify_attributes }}>
         {% render 'pdp-block-description', description: product.description %}
     </br>
+
+                                            {% if product.handle contains 'damaged' %}
+                                            <div id="damage-condition-dynamic"
+                                                class="damage-condition-block"
+                                                style="display:none; margin-bottom: 1.5rem;"></div>
+                                            {% endif %}
       <hr>
-        {% if product.metafields.custom.pub_date.value %}
-            {% assign pub_date = product.metafields.custom.pub_date.value | date: '%Y-%m-%d' %}
-            
-            {% assign year = pub_date | date: '%Y' %}
-            {% assign month = pub_date | date: '%m' %}
-            {% assign day = pub_date | date: '%d' %}
-            
-            {% if month == '01' and day == '01' %}
-                <p>Published: {{ year }}</p>
-            {% else %}
-                {% assign formatted_date = pub_date | date: "%B %-d, %Y" %}
-                <p>Published: {{ formatted_date }}</p>
-            {% endif %}
-            
-        {% endif %}
+        {% comment %}
+        1. Assign the raw date values from your metafields.
+        {% endcomment %}
+        {%- assign pub_date = product.metafields.custom.pub_date.value -%}
+        {%- assign preorder_date = product.metafields.custom.preorder_override_date.value -%}
+
+        {% comment %}
+        2. Determine the later date to display.
+        {% endcomment %}
+        {%- assign date_to_display = '' -%}
+        {%- if pub_date and preorder_date -%}
+        {%- if preorder_date > pub_date -%}
+            {%- assign date_to_display = preorder_date -%}
+        {%- else -%}
+            {%- assign date_to_display = pub_date -%}
+        {%- endif -%}
+        {%- elsif pub_date -%}
+        {%- assign date_to_display = pub_date -%}
+        {%- elsif preorder_date -%}
+        {%- assign date_to_display = preorder_date -%}
+        {%- endif -%}
+
+        {% comment %}
+        3. If a date was selected, determine the text and display it.
+        {% endcomment %}
+        {%- if date_to_display != '' -%}
+        {% comment %}
+            NEW: Check if the date is in the future.
+            We format both 'now' and the selected date to 'YYYY-MM-DD'
+            to ensure an accurate comparison.
+        {% endcomment %}
+        {%- assign today = 'now' | date: '%Y-%m-%d' -%}
+        {%- assign check_date = date_to_display | date: '%Y-%m-%d' -%}
+        
+        {%- assign publish_text = 'Published on' -%}
+        {%- if check_date > today -%}
+            {%- assign publish_text = 'Will be published on' -%}
+        {%- endif -%}
+        
+        {% comment %}
+            Apply your original formatting rules using the new dynamic text.
+        {% endcomment %}
+        {%- assign year = date_to_display | date: '%Y' -%}
+        {%- assign month = date_to_display | date: '%m' -%}
+        {%- assign day = date_to_display | date: '%d' -%}
+        
+        {%- if month == '01' and day == '01' -%}
+            <p>{{ publish_text }} {{ year }}</p>
+        {%- else -%}
+            {%- assign formatted_date = date_to_display | date: "%B %-d, %Y" -%}
+            <p>{{ publish_text }} {{ formatted_date }}</p>
+        {%- endif -%}
+        {%- endif -%}
     </div>
 
                                         {%- when 'buy_buttons' -%}
@@ -525,26 +582,25 @@
                                                           type="submit"
                                                           name="add"
                                                           class="c-btn c-btn--full c-btn--{% if block.settings.enable_payment_button %}hollow{% else %}primary{% endif %} product-form__add-btn js-product-add
-                                                                 {% if current_variant.inventory_quantity < 1 and collection.title != 'Past Out-of-Print Offers' and collection.title != 'Preorder' and product.available == true and product.type != 'Hats' and in_preorder_collection == false and product.type != 'GCP' and product.type != 'T-Shirt' %} backorder_button {% endif %}"
+                                                                 {% if v_available and current_qty < 1 and in_preorder_collection == false and in_pastop_collection == false and product.type != 'Hats' and product.type != 'GCP' and product.type != 'T-Shirt' %}
+                                                                    backorder_button
+                                                                {% endif %}
                                                           {% if current_variant.available == false %}disabled{% endif %}>
                                                   
                                                             <span class="product-form__add-btn__text">
                                                                 <span class="js-product-add-text">
-                                                                {%- comment -%}
-                                                                {%- if current_variant.available -%}
-                                                                    {{ 'products.product.add_to_cart' | t }}
-                                                                {%- else -%}
-                                                                    {{ 'products.product.sold_out' | t }}
-                                                                {%- endif -%}
-                                                                {%- endcomment -%}
-                                                                {%- if current_variant.inventory_quantity < 1 and collection.title != 'Past Out-of-Print Offers' and collection.title != 'Preorder' and product.available == true and product.type != 'Hats' and  in_preorder_collection == false and product.type != 'GCP' and product.type != 'T-Shirt' -%}
-                                                                AVAILABLE ON BACKORDER
-                                                                {%- elsif in_preorder_collection and product.available == true -%}
-            													PREORDER
-                                                                {%- elsif current_date > pub_date and product.type == 'Event' %}
-                                                                THIS EVENT HAS ENDED
-                                                                {%- elsif product.available == false -%}
+                                                                {%- if v_available == false -%}
                                                                 SOLD OUT
+
+                                                                {%- elsif in_preorder_collection and product.available -%}
+                                                                PREORDER
+
+                                                                {%- elsif product.type == 'Event' and current_date > pub_date -%}
+                                                                THIS EVENT HAS ENDED
+
+                                                                {%- elsif v_available and current_qty < 1 and in_preorder_collection == false and in_pastop_collection == false and product.type != 'Hats' and product.type != 'GCP' and product.type != 'T-Shirt' -%}
+                                                                AVAILABLE ON BACKORDER
+
                                                                 {%- else -%}
                                                                 ADD TO CART
                                                                 {%- endif -%}
@@ -565,56 +621,31 @@
                                                         {% endif %}
                                                         {% comment %} Stock status message {% endcomment %}
                                               	<div class="stock_status">
-									{% for collection in product.collections %}
-                                      {% if in_preorder_collection == false and collection.title == 'Preorder' %}
-                                          {% assign in_preorder_collection = true %}
-                                      {% endif %}
-                                    {% endfor %}
-                                    
-                                      {% if in_preorder_collection and product.available == true %}
-                                      This is a Preorder title and will ship on its release date.
-                                      {% endif %}
-                                  
-                                    {% for collection in product.collections %}
-                                      {% if in_pastop_collection == false and collection.title == 'Past Out-of-Print Offers' %}
-                                          {% assign in_pastop_collection = true %}
-                                      {% endif %}
-                                  {% endfor %}
-                                  {% if in_pastop_collection %}
-                                      This is a past out-of-print offer.
-                                      {% comment %}<a href="/pages/out-of-print-books-older-recent-and-hard-to-find" style="text-decoration:underline;color:#6a6ede;">Please let us know if you would like us to source a similar copy for you.</a>{% endcomment %}
-                                  {% endif %}
-                                  
-                                  {% if current_variant.inventory_quantity > 0 and collection.title != 'Past Out-of-Print Offers' and collection.title != 'Preorder' and product.type != 'Event' and product.type != 'Hats' %}
-                                      This item is in stock and will ship promptly.
-                                  {% endif %}
+									{% if in_preorder_collection and product.available %}
+                                    This is a Preorder title and will ship on its release date.
 
-                                  {% if current_variant.inventory_quantity < 1 and collection.title != 'Past Out-of-Print Offers' and collection.title != 'Preorder' and product.available == true and product.type != 'Hats' and in_preorder_collection == false and product.type != 'GCP' and product.type != 'Event' and product.type != 'T-Shirt'%}
-                                      This item is backordered and will ship as soon as the publisher resupplies us.
-                                  {% endif %}
-                                  
-                                  {% if product.type == 'Hats' %}
-                                      This custom merch will be created to order and will ship separately from the rest of your order.
-                                  {% endif %}
+                                    {% elsif in_pastop_collection %}
+                                    This is a past out-of-print offer.
 
-                                  {% if product.type == 'T-Shirt' %}
-                                      This custom merch will be created to order and will ship separately from the rest of your order.
-                                  {% endif %}
+                                    {% elsif product.type == 'Hats' or product.type == 'T-Shirt' %}
+                                    This custom merch will be created to order and will ship separately from the rest of your order.
 
-                                                  {% unless product.tags contains 'pastop' or product.type == 'Event' %}
-                                  {% if product.available == false and collection.title != 'Past Out-of-Print Offers' %}
-                                      This item is no longer available.
-                                  {% endif %}
-                                                  {% endunless %}
-                                  {% if product.type == 'GCP' %}
-                                      {{ }}
-                                  {% endif %}
-                                  
-                                  {% if product.type == 'Event' and current_variant.inventory_quantity > 0 %}
-                                  {{  }}
-                                  {% endif %}
+                                    {% elsif v_available and current_qty > 0 %}
+                                    This item is in stock and will ship promptly.
+
+                                    {% elsif v_available and current_qty < 1 and in_preorder_collection == false and in_pastop_collection == false and product.type != 'GCP' and product.type != 'Event' %}
+                                    This item is backordered and will ship as soon as the publisher resupplies us.
+
+                                    {% elsif product.available == false %}
+                                    This item is no longer available.
+
+                                    {% endif %}
 
                                   {% if product.available == false %}
+                                    {% assign current_barcode = product.variants.first.barcode | default: '' %}
+                                    {% assign current_id = product.id | split: '/' | last %}
+
+                                    {% unless blacklisted_product_ids contains current_id or blacklisted_barcodes contains current_barcode %}
                                     <div id="notify-form-wrapper" class="product-form__line-item-field" style="margin-top: 1rem;">
                                       <label id="notify-label" for="notify-email" class="product-form__line-item-text-label">
                                         Want to be added to our request list?
@@ -731,8 +762,8 @@
                                         });
                                       });
                                     </script>
-                                  {% endif %}
-                                    
+                                    {% endunless %}
+                                  {% endif %}                                    
                                                   </div>
                                                     </div>
                                                     <div class="product-form__shopify-payment-terms">
@@ -861,6 +892,11 @@
 
                                             </div>
 
+                                        {% assign has_inventory = false %}
+                                        {% if current_variant and current_variant.inventory_quantity > 0 %}
+                                        {% assign has_inventory = true %}
+                                        {% endif %}
+
                                         {%- when 'variant_picker' -%}
                                             <div class="product-single__box__block product-single__box__block--{{ block.type }}" {{ block.shopify_attributes }}>
                                                 {%- unless product.has_only_default_variant -%}
@@ -898,16 +934,60 @@
                                             </div>
 
                                         {%- when 'quantity_selector' -%}
-                                          {% unless collection.title == 'Past Out-of-Print Offers' or product.tags contains 'pastop' or product.type == 'Event'%}
-                                            <div class="product-single__box__block product-single__box__block--{{ block.type }}" {{ block.shopify_attributes }}>
-                                                <div class="product-form__qty">
-                                                    <label for="Quantity" class="quantity-selector f-family--{{ settings.type_product_form_headings_style }} f-caps--{{ settings.type_product_form_headings_capitalize }} f-space--{{ settings.type_product_form_headings_letterspace }}">{{ 'products.product.quantity' | t }}</label>
-                                                    <div class="product-form__qty-input">
-                                                        <input type="number" id="Quantity" name="quantity" value="1" min="1" class="quantity-selector js-qty-input" form="{{ product_form_id }}">
+                                            {% unless product.type == 'Event' or product.tags contains 'pastop' or collection.title == 'Past Out-of-Print Offers' %}
+
+                                                {%- comment -%}
+                                                CUSTOM FIX:
+                                                Damaged books must ONLY show quantity selector when variant is in stock.
+                                                Otherwise: hide label + selector completely.
+                                                {%- endcomment -%}
+
+                                                {% if product.handle contains 'damaged' %}
+                                                {% if has_inventory %}
+                                                    <div class="product-single__box__block product-single__box__block--{{ block.type }}" {{ block.shopify_attributes }}>
+                                                        <div class="product-form__qty">
+                                                            <label for="Quantity"
+                                                                class="quantity-selector f-family--{{ settings.type_product_form_headings_style }}
+                                                                f-caps--{{ settings.type_product_form_headings_capitalize }}
+                                                                f-space--{{ settings.type_product_form_headings_letterspace }}">
+                                                                {{ 'products.product.quantity' | t }}
+                                                            </label>
+                                                            <div class="product-form__qty-input">
+                                                                <input type="number"
+                                                                    id="Quantity"
+                                                                    name="quantity"
+                                                                    value="1"
+                                                                    min="1"
+                                                                    class="quantity-selector js-qty-input"
+                                                                    form="{{ product_form_id }}">
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                {% endif %}
+
+                                                {% else %}
+                                                <div class="product-single__box__block product-single__box__block--{{ block.type }}" {{ block.shopify_attributes }}>
+                                                    <div class="product-form__qty">
+                                                        <label for="Quantity"
+                                                            class="quantity-selector f-family--{{ settings.type_product_form_headings_style }}
+                                                            f-caps--{{ settings.type_product_form_headings_capitalize }}
+                                                            f-space--{{ settings.type_product_form_headings_letterspace }}">
+                                                            {{ 'products.product.quantity' | t }}
+                                                        </label>
+                                                        <div class="product-form__qty-input">
+                                                            <input type="number"
+                                                                id="Quantity"
+                                                                name="quantity"
+                                                                value="1"
+                                                                min="1"
+                                                                class="quantity-selector js-qty-input"
+                                                                form="{{ product_form_id }}">
+                                                        </div>
                                                     </div>
                                                 </div>
-                                            </div>
-                                          {% endunless %}
+                                                {% endif %}
+
+                                            {% endunless %}
                                         {%- when 'inventory_notice' -%}
                                             <div id="inventory-notice-{{ section.id }}" class="product-single__box__block product-single__box__block--{{ block.type }}" data-inventory-limit="{{ block.settings.inventory_limit }}" data-show-qty="{{ block.settings.show_qty }}" {{ block.shopify_attributes }}>
 
@@ -1049,7 +1129,7 @@
 
                                                         <label for="line-item-text-{{ block.id }}" class="product-form__line-item-text-label f-family--{{ settings.type_product_form_headings_style }} f-caps--{{ settings.type_product_form_headings_capitalize }} f-space--{{ settings.type_product_form_headings_letterspace }}">{{ block.settings.line-item-text-label }}</label>
 
-                                                        <{% if block.settings.line-item-text-long %}textarea {% else %}input {% endif %}
+                                                        {% if block.settings.line-item-text-long %}textarea {% else %}input {% endif %}
                                                             {% if block.settings.line-item-text-required %}required{% endif %}
                                                             id="line-item-text-{{ block.id }}"
                                                             class="product-form__line-item-text-input"
@@ -1944,22 +2024,6 @@ new ResizeObserver(theme.setPdpHeight).observe(
             "id": "thumbnails_show_border",
             "label": "Show thumbnail border",
             "default": false
-        },
-        {
-            "type": "checkbox",
-            "id": "damaged_fallback_enable",
-            "label": "Show damaged-book block",
-            "default": true
-        },
-        {
-            "type": "select",
-            "id": "damaged_block_fallback_column",
-            "label": "Damaged block position (fallback)",
-            "default": "secondary",
-            "options": [
-                { "value": "primary", "label": "Form column" },
-                { "value": "secondary", "label": "Gallery column" }
-            ]
         }
     ],
     "blocks": [
@@ -2101,29 +2165,6 @@ new ResizeObserver(theme.setPdpHeight).observe(
                 {
                   "type": "paragraph",
                   "content": "Let your customers know that they can pick up the product. [Learn more](https://help.shopify.com/en/manual/shipping/setting-up-and-managing-your-shipping/local-methods/local-pickup)"
-                }
-            ]
-        },
-        {
-            "type": "damaged-book",
-            "name": "Damaged book notice",
-            "limit": 1,
-            "settings": [
-                {
-                "type": "select",
-                "id": "column",
-                "label": "Position (desktop)",
-                "default": "secondary",
-                "options": [
-                    {
-                    "value": "primary",
-                    "label": "Form column"
-                    },
-                    {
-                    "value": "secondary",
-                    "label": "Gallery column"
-                    }
-                ]
                 }
             ]
         },
@@ -3857,9 +3898,6 @@ new ResizeObserver(theme.setPdpHeight).observe(
             },
             {
                 "type": "share"
-            },
-            {
-                "type": "damaged-book"
             },
             {
                 "type": "description"

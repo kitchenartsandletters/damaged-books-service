@@ -378,7 +378,115 @@ A full “repair + normalize” operation.
 # 11. Deployment
 (Existing deployment instructions unchanged.)
 
----
+⸻
+
+## Future Development: Collection Publishing Strategies (Deferred)
+
+The Damaged Books Service (DBS) currently manages publication state reactively, driven by Shopify inventory webhooks. This design is intentional and correct for the current operational model.
+
+However, there are scenarios where additional collection-level automation may be desirable in a future phase. The following options are documented here for reference only and are not implemented.
+
+Current Behavior (Authoritative)
+	•	Damaged products are created without forced collection membership.
+	•	Inventory changes (via inventory_levels/update) trigger DBS evaluation.
+	•	Publication rules:
+	•	If any damaged variant has available inventory → product is published.
+	•	If all variants reach zero → product is unpublished.
+	•	Collection membership (e.g. damaged-books) is therefore implicitly managed by publication state and webhook activity.
+
+This keeps DBS idempotent, replay-safe, and aligned with Shopify’s source of truth.
+
+⸻
+
+Option A — Inventory-Only Webhook Control (Status Quo)
+
+Description
+Continue relying exclusively on inventory webhooks to drive both product publication and collection membership.
+
+Pros
+	•	Zero additional logic
+	•	Fully event-driven and replay-safe
+	•	No risk of drift between Supabase and Shopify
+
+Cons
+	•	Products with no inventory changes will not re-evaluate collection membership
+	•	Bulk-created or manually edited products may require an inventory touch to reconcile
+
+Status
+✅ Current behavior
+🟡 Documented for completeness
+
+⸻
+
+Option B — Post-Creation Reconciliation Hook (Recommended Future Option)
+
+Description
+After bulk creation or admin-driven damaged product creation, explicitly enqueue a reconciliation step that:
+	•	Evaluates damaged variants
+	•	Applies publish/unpublish rules
+	•	Applies or removes the damaged-books collection membership
+
+This would reuse existing reconciliation logic rather than duplicating rules.
+
+Pros
+	•	Ensures newly created products immediately reflect correct state
+	•	No dependency on a future inventory webhook
+	•	Minimal architectural change
+
+Cons
+	•	Adds one additional execution path
+	•	Requires explicit invocation after creation workflows
+
+Likely Location
+	•	used_book_manager.py
+	•	Or a shared reconciliation helper invoked by both webhooks and admin actions
+
+Status
+🔒 Deferred
+⭐ Preferred next-phase enhancement
+
+⸻
+
+Option C — Scheduled Reconciliation / Safety Net
+
+Description
+Introduce a scheduled job (cron or manual admin endpoint) that periodically reconciles:
+	•	Damaged inventory
+	•	Publication state
+	•	Collection membership
+
+This acts as a safety net rather than a primary driver.
+
+Pros
+	•	Self-healing for rare edge cases
+	•	Useful for audits and recovery scenarios
+
+Cons
+	•	Not real-time
+	•	Additional operational surface area
+
+Status
+🔒 Deferred
+🟡 Optional hardening step
+
+⸻
+
+Explicit Non-Goals (For Now)
+	•	No collection toggling directly in Liquid
+	•	No polling-based Shopify queries
+	•	No nav-menu mutation without authoritative backend state
+	•	No deviation from webhook-first design
+
+⸻
+
+Summary
+
+The current DBS behavior is correct and intentional.
+These options are documented to prevent future ambiguity and to provide a clear, scoped roadmap when requirements change.
+
+No action is required unless:
+	•	Bulk creation becomes frequent without inventory movement, or
+	•	Operational tooling requires immediate visibility guarantees.
 
 # License
 Internal / Proprietary
