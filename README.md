@@ -136,7 +136,7 @@ condition, quantity, price_override
 
 After product creation:
 
-1. REST fetch variant → get `inventory_item_id`
+1. GraphQL fetch variant → get `inventory_item_id`
 2. Set Shopify inventory via `inventory_levels/set.json`
 3. Shopify emits webhook
 4. DBS upserts into Supabase
@@ -487,6 +487,117 @@ These options are documented to prevent future ambiguity and to provide a clear,
 No action is required unless:
 	•	Bulk creation becomes frequent without inventory movement, or
 	•	Operational tooling requires immediate visibility guarantees.
+
+# 12. Manual Testing: cURL Bulk-Create Example
+
+This section documents the **canonical test request** used to validate damaged-product creation end‑to‑end against the live Shopify catalog.
+
+This is intended for **engineering verification only**.  
+Staff should **never** use this method in day‑to‑day operations.
+
+---
+
+## 12.1 Purpose of This Test
+
+This cURL request verifies that:
+
+- Duplicate checks are enforced
+- A damaged product is created with the correct handle and title
+- All three damage-condition variants are created
+- Variant-level inventory is initialized correctly
+- Creation is logged in `creation_log`
+- Publish / unpublish rules are evaluated correctly
+
+It exercises the **entire DBS pipeline**.
+
+---
+
+## 12.2 Example Payload
+
+Example JSON payload used during testing:
+
+```json
+{
+  "canonical_handle": "the-irish-bakery",
+  "variants": [
+    { "condition": "light", "quantity": 12 },
+    { "condition": "moderate", "quantity": 0 },
+    { "condition": "heavy", "quantity": 0 }
+  ],
+  "dry_run": false
+}
+```
+
+Notes:
+- `canonical_handle` must refer to an **existing canonical product**
+- `condition` must be one of: `light`, `moderate`, `heavy`
+- Quantity may be zero for any variant
+- `dry_run: false` performs a real creation
+
+---
+
+## 12.3 cURL Command
+
+```bash
+curl -X POST https://used-books-service-production.up.railway.app/admin/bulk-create \
+  -H "Content-Type: application/json" \
+  -H "x-admin-token: $VITE_DBS_ADMIN_TOKEN" \
+  -d @the-irish-bakery.json
+```
+
+Where:
+- `the-irish-bakery.json` contains the payload shown above
+- `$VITE_DBS_ADMIN_TOKEN` is the admin token injected via environment variables
+
+---
+
+## 12.4 Expected Result
+
+On success, the response will resemble:
+
+```json
+{
+  "status": "created",
+  "damaged_product_id": "7222956392581",
+  "variants": [
+    {
+      "condition": "Light Damage",
+      "variant_id": "41455508619397",
+      "quantity_set": 12
+    },
+    {
+      "condition": "Moderate Damage",
+      "variant_id": "41455508652165",
+      "quantity_set": 0
+    },
+    {
+      "condition": "Heavy Damage",
+      "variant_id": "41455508684933",
+      "quantity_set": 0
+    }
+  ],
+  "messages": ["Damaged product created successfully."]
+}
+```
+
+After this:
+- The damaged product exists in Shopify as a **draft or published product** (depending on inventory rules)
+- Inventory webhooks fire automatically
+- Supabase inventory rows are created
+- Canonical metafields and redirects are applied
+
+---
+
+## 12.5 Important Warnings
+
+- **Never** manually create damaged products in Shopify
+- **Never** edit damaged product variants directly
+- **Never** use this endpoint outside controlled testing
+- This endpoint bypasses all UI safeguards and is intentionally strict
+
+All operational usage must go through approved tooling.
+
+---
 
 # License
 Internal / Proprietary
