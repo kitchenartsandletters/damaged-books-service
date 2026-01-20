@@ -82,11 +82,10 @@ async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
         # --------------------------------------------------
         # Resolve by product_id
         # --------------------------------------------------
-        if itype == "product_id":
-            try:
-                product = await get_product_by_id(value)
-            except Exception as e:
-                raise ValueError(f"Failed to resolve product_id {value}: {e}")
+        if itype == "product_id" and len(value) >= 10:
+            raise ValueError(
+                f"Input '{value}' is too long to be a Shopify product_id; did you mean ISBN?"
+            )
 
         # --------------------------------------------------
         # Resolve by ISBN / barcode (GraphQL only)
