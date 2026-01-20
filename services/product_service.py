@@ -94,11 +94,11 @@ async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
         elif itype == "isbn":
             try:
                 # Use GraphQL resolver for barcode/ISBN
-                resolved = await shopify_client.resolve_product_by_barcode_gql(value)
-                if resolved is None:
+                resolution = await shopify_client.resolve_product_by_barcode_gql(value)
+                if resolution is None:
                     raise ValueError(f"No product found with barcode/ISBN {value}")
-                # resolved is a single dict with a canonical product_id
-                product_id = resolved.get("product_id")
+                # resolution is a single dict with a canonical product_id
+                product_id = resolution.get("product_id")
                 if not product_id:
                     raise ValueError(f"Resolved variant missing product_id for barcode/ISBN {value}")
                 product = await shopify_client.get_product_by_id_gql(str(product_id))
