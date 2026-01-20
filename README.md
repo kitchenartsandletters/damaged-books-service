@@ -291,8 +291,10 @@ A canonical handle is rejected when:
 
 Checks run on:
 - `/admin/check-duplicate`
-- `/admin/bulk-preview`
+- `/admin/bulk-create/preview`
 - `/admin/bulk-create` (final guard)
+
+The preview endpoint (`/admin/bulk-create/preview`) returns duplicate conflicts but does not block confirm logic enforcement. All duplicate enforcement is ultimately handled at the confirm step.
 
 ---
 
@@ -301,36 +303,94 @@ Checks run on:
 ## Request Model
 ```
 {
-  canonical_handle: str,
-  canonical_title: str,
-  isbn: str | null,
-  barcode: str | null,
-  variants: [VariantSeed] | null,
-  dry_run: bool
+  inputs: [
+    { type: "isbn" | "product_id", value: string }
+  ],
+  inventory: {
+    light: number,
+    moderate: number,
+    heavy: number
+  }
 }
 ```
 
-Removed:
-- damaged_title  
-- damaged_handle  
-
-Both are derived automatically.
+`canonical_handle` is deprecated and supported only for legacy testing. All resolution of input values happens server-side inside DBS.
 
 ## Endpoints
 - `POST /admin/check-duplicate`
-- `POST /admin/bulk-preview`
+- `POST /admin/bulk-create/preview`
 - `POST /admin/bulk-create`
 - `GET  /admin/creation-log`
 
-`bulk-create`:
-- enforces duplicate check  
-- derives handle/title  
-- creates product  
-- initializes inventory  
-- logs creation  
-- triggers publish/unpublish pipeline  
+`POST /admin/bulk-create/preview` performs server-side resolution and validation only (no writes, no inventory mutation, and no logging side effects).
+
+`/admin/bulk-create` is the confirm-only, irreversible step that performs creation and all side effects.
 
 ---
+
+### 7.1 Preview → Confirm Contract (Authoritative)
+
+The Bulk Create system is a strict two-phase workflow:
+
+1. **Preview phase** (`POST /admin/bulk-create/preview`)
+   - Resolves all inputs (ISBN or product_id) server-side
+   - Enforces single-variant canonical rule
+   - Detects duplicates and conflicts
+   - Computes variant-level pricing and discounts
+   - Returns a preview payload describing *exactly* what would be created
+   - Performs **zero writes**
+
+2. **Confirm phase** (`POST /admin/bulk-create`)
+   - Accepts **only preview-derived items**
+   - Performs irreversible Shopify writes
+   - Re-runs duplicate checks as a final guard
+   - Logs all outcomes in `creation_log`
+
+The confirm endpoint does **not** re-resolve inputs, recompute inventory, or infer pricing.
+
+### 7.2 BulkCreateConfirmRequest (Confirm-Only Schema)
+
+The confirm endpoint accepts a restricted payload derived *only* from preview results:
+
+```json
+{
+  "items": [
+    {
+      "canonical_handle": "string",
+      "inventory": {
+        "light": number,
+        "moderate": number,
+        "heavy": number
+      }
+    }
+  ]
+}
+```
+
+Guarantees:
+- `items[]` must be non-empty
+- Each `canonical_handle` must match a previewed product
+- Inventory keys must be exactly: `light`, `moderate`, `heavy`
+- Pricing, discounts, SKUs, and barcodes are **not** accepted from clients
+- Any deviation results in a hard error
+
+### 7.3 Admin Dashboard Integration (Handoff Notes)
+
+The Admin Dashboard (AD) must treat DBS as an authoritative backend, not a helper API.
+
+Rules:
+- AD never resolves ISBNs or product IDs itself
+- AD never computes pricing or discounts
+- AD never mutates preview data
+- AD confirm payloads must be derived directly from preview results
+
+Required endpoints:
+- `POST /admin/bulk-create/preview`
+- `POST /admin/bulk-create` (confirm-only)
+
+The Bulk Create Wizard in AD mirrors this contract:
+- Preview = truth
+- Confirm = irreversible execution
 
 # 8. Creation Log
 
@@ -489,6 +549,8 @@ No action is required unless:
 	•	Operational tooling requires immediate visibility guarantees.
 
 # 12. Manual Testing: cURL Bulk-Create Example
+
+**Note:** This legacy cURL example uses the deprecated `canonical_handle` path. Bulk workflows must now use `inputs[]` plus the preview → confirm flow.
 
 This section documents the **canonical test request** used to validate damaged-product creation end‑to‑end against the live Shopify catalog.
 

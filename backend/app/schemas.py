@@ -1,6 +1,6 @@
 # backend/app/schemas.py
 
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 from pydantic import BaseModel, Field
 
 
@@ -50,6 +50,20 @@ class DuplicateCheckResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# BULK CREATE: Input and Inventory Seed Models
+# ---------------------------------------------------------------------------
+
+class BulkCreateInput(BaseModel):
+    type: str  # "isbn" | "product_id"
+    value: str
+
+
+class InventorySeed(BaseModel):
+    light: int = 0
+    moderate: int = 0
+    heavy: int = 0
+
+# ---------------------------------------------------------------------------
 # BULK CREATE: Variant injection
 # ---------------------------------------------------------------------------
 
@@ -62,9 +76,17 @@ class VariantSeed(BaseModel):
 # BULK CREATE: Request to /admin/bulk-create
 # ---------------------------------------------------------------------------
 
+
+# BulkCreateRequest: `inputs` + `inventory` is canonical, `canonical_handle` is legacy
 class BulkCreateRequest(BaseModel):
-    canonical_handle: str
+    # New bulk interface (preferred)
+    inputs: Optional[List[BulkCreateInput]] = None
+    inventory: Optional[InventorySeed] = None
+
+    # Legacy single-canonical interface (deprecated)
+    canonical_handle: Optional[str] = None
     variants: List[VariantSeed] = Field(default_factory=list)
+
     dry_run: bool = False
 
 # ---------------------------------------------------------------------------
@@ -88,3 +110,48 @@ class BulkCreateResult(BaseModel):
     damaged_handle: Optional[str] = None
     variants: List[CreatedVariantInfo] = []
     messages: List[str] = []
+
+# ---------------------------------------------------------------------------
+# BULK CREATE: Confirm (execution-only)
+# Preview-derived payload ONLY
+# ---------------------------------------------------------------------------
+
+class BulkCreateConfirmItem(BaseModel):
+    """
+    A single damaged variant to be created.
+    This must be derived verbatim from preview output.
+    """
+
+    canonical_product_id: int = Field(
+        ...,
+        description="Shopify product ID of the canonical (single-variant) product"
+    )
+
+    canonical_handle: str = Field(
+        ...,
+        description="Handle of the canonical product (for logging + validation only)"
+    )
+
+    condition_key: Literal["light", "moderate", "heavy"] = Field(
+        ...,
+        description="Damage condition to create"
+    )
+
+    inventory: int = Field(
+        ...,
+        ge=0,
+        description="Inventory quantity to seed for this damaged variant"
+    )
+
+
+class BulkCreateConfirmRequest(BaseModel):
+    """
+    Confirm request for /admin/bulk-create.
+    Executes ONLY what preview already computed.
+    """
+
+    items: List[BulkCreateConfirmItem] = Field(
+        ...,
+        min_items=1,
+        description="Preview-derived items to execute"
+    )

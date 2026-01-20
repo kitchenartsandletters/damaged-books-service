@@ -31,6 +31,7 @@ except ValueError:
 # Variant helpers & condition metadata
 # ---------------------------------------------------------------------------
 
+
 CONDITION_META = {
     "light": {
         "title": "Light Damage",
@@ -45,6 +46,120 @@ CONDITION_META = {
         "default_discount": 0.60,
     },
 }
+
+# --------------------------------------------------------
+# Bulk input resolver for canonical products
+# --------------------------------------------------------
+
+from backend.app.schemas import BulkCreateInput
+
+async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
+    """
+    Resolve BulkCreateInput[] → canonical Shopify products.
+
+    Rules enforced:
+      - Each input must resolve to exactly one canonical product
+      - Canonical product must exist
+      - Canonical product must have exactly one variant
+      - Damaged / used products are invalid as inputs
+    """
+
+    resolved: list[dict] = []
+    seen_product_ids: set[str] = set()
+
+    for inp in inputs:
+        itype = (inp.type or "").strip().lower()
+        value = (inp.value or "").strip()
+
+        if itype not in ("isbn", "product_id"):
+            raise ValueError(f"Unsupported input type: {itype}")
+
+        logger.info("[BulkResolve] Resolving input type=%s value=%s", itype, value)
+
+        product: dict | None = None
+
+        # --------------------------------------------------
+        # Resolve by product_id
+        # --------------------------------------------------
+        if itype == "product_id":
+            try:
+                product = await get_product_by_id(value)
+            except Exception as e:
+                raise ValueError(f"Failed to resolve product_id {value}: {e}")
+
+        # --------------------------------------------------
+        # Resolve by ISBN / barcode
+        # --------------------------------------------------
+        elif itype == "isbn":
+            try:
+                resp = await shopify_client.get(
+                    "variants.json",
+                    query={"barcode": value, "limit": 5},
+                )
+                variants = resp.get("body", {}).get("variants", []) or []
+
+                if not variants:
+                    raise ValueError(f"No variant found with barcode/ISBN {value}")
+
+                if len(variants) > 1:
+                    raise ValueError(f"Multiple variants found with barcode/ISBN {value}")
+
+                variant = variants[0]
+                product_id = variant.get("product_id")
+                if not product_id:
+                    raise ValueError(f"Variant {variant.get('id')} missing product_id")
+
+                product = await get_product_by_id(str(product_id))
+            except Exception as e:
+                raise ValueError(f"Failed to resolve ISBN {value}: {e}")
+
+        if not product:
+            raise ValueError(f"Unable to resolve input {itype}:{value}")
+
+        handle = (product.get("handle") or "").lower()
+
+        # --------------------------------------------------
+        # Reject damaged products as inputs
+        # --------------------------------------------------
+        raw_tags = product.get("tags") or ""
+        tags = [t.strip().lower() for t in raw_tags.split(",") if t.strip()]
+
+        if handle.endswith("-damaged") or "damaged" in tags:
+            raise ValueError(
+                f"Damaged product cannot be used as canonical input: {handle}"
+            )
+
+        variants = product.get("variants") or []
+
+        if len(variants) != 1:
+            raise ValueError(
+                f"Canonical product '{handle}' has {len(variants)} variants; exactly 1 required"
+            )
+
+        pid = str(product.get("id"))
+        if pid in seen_product_ids:
+            raise ValueError(
+                f"Duplicate canonical product resolved multiple times: product_id={pid}"
+            )
+        seen_product_ids.add(pid)
+
+        logger.info(
+            "[BulkResolve] Canonical resolved: product_id=%s handle=%s title=%s",
+            product.get("id"),
+            handle,
+            product.get("title"),
+        )
+
+        resolved.append(
+            {
+                "product_id": str(product.get("id")),
+                "handle": handle,
+                "title": product.get("title"),
+                "variant": variants[0],
+            }
+        )
+
+    return resolved
 
 def _snake_handle(handle: str) -> str:
     """
@@ -61,6 +176,146 @@ def _make_barcode_for_condition(canonical_handle: str, condition_key: str) -> st
     """
     base = _snake_handle(canonical_handle)
     return f"{base}_{condition_key}"
+
+
+# Pure preview helper for damaged variant preview
+
+def compute_damaged_variant_preview(
+    canonical_handle: str,
+    canonical_variant: dict,
+    inventory_seed: InventorySeed,
+) -> list[dict]:
+    """
+    Pure function: derive damaged variant preview rows.
+    NO Shopify calls.
+    NO side effects.
+    """
+
+    canonical_price = float(canonical_variant.get("price") or 0)
+    canonical_sku = canonical_variant.get("sku")
+
+    rows = []
+
+    for cond_key, meta in CONDITION_META.items():
+        pct = meta["default_discount"]
+        price = f"{canonical_price * (1 - pct):.2f}"
+
+        rows.append({
+            "condition": cond_key,
+            "title": meta["title"],
+            "price": price,
+            "discount_pct": pct,
+            "inventory_seed": getattr(inventory_seed, cond_key, 0),
+            "sku": canonical_sku,
+            "barcode": _make_barcode_for_condition(canonical_handle, cond_key),
+        })
+
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Confirm-phase writer: create damaged products from preview-derived payloads
+# ---------------------------------------------------------------------------
+async def create_damaged_from_preview_items(
+    items: list[dict],
+) -> list[BulkCreateResult]:
+    """
+    Confirm-phase writer.
+    Consumes ONLY preview-derived payloads.
+    Performs irreversible Shopify writes.
+
+    Expected item shape (per entry):
+      {
+        "canonical_handle": str,
+        "inventory": {
+          "light": int,
+          "moderate": int,
+          "heavy": int
+        }
+      }
+    """
+
+    if not items:
+        raise ValueError("Confirm requires non-empty preview items[]")
+
+    results: list[BulkCreateResult] = []
+
+    REQUIRED_INV_KEYS = {"light", "moderate", "heavy"}
+
+    for idx, item in enumerate(items):
+        # -------------------------------
+        # 1. Strict shape validation
+        # -------------------------------
+        if not isinstance(item, dict):
+            raise ValueError(f"Malformed preview item at index {idx}: not an object")
+
+        canonical_handle = (item.get("canonical_handle") or "").strip()
+        inventory = item.get("inventory")
+
+        if not canonical_handle:
+            raise ValueError(f"Malformed preview item at index {idx}: missing canonical_handle")
+
+        if not isinstance(inventory, dict):
+            raise ValueError(f"Malformed preview item at index {idx}: inventory must be an object")
+
+        if set(inventory.keys()) != REQUIRED_INV_KEYS:
+            raise ValueError(
+                f"Malformed preview item at index {idx}: "
+                f"inventory keys must be exactly {sorted(REQUIRED_INV_KEYS)}"
+            )
+
+        # -------------------------------
+        # 2. Inventory hardening
+        # -------------------------------
+        variants: list[VariantSeed] = []
+
+        for cond in ("light", "moderate", "heavy"):
+            raw_qty = inventory.get(cond)
+
+            if raw_qty is None:
+                qty = 0
+            else:
+                try:
+                    qty = int(raw_qty)
+                except Exception:
+                    raise ValueError(
+                        f"Malformed preview item at index {idx}: "
+                        f"inventory.{cond} must be an integer"
+                    )
+
+            if qty < 0:
+                raise ValueError(
+                    f"Malformed preview item at index {idx}: "
+                    f"inventory.{cond} cannot be negative"
+                )
+
+            # Explicitly block price overrides at confirm time
+            variants.append(
+                VariantSeed(
+                    condition=cond,
+                    quantity=qty,
+                    price_override=None,
+                )
+            )
+
+        logger.info(
+            "[BulkConfirm] Executing damaged creation for canonical_handle=%s",
+            canonical_handle,
+        )
+
+        # -------------------------------
+        # 3. Execute irreversible write
+        # -------------------------------
+        data = BulkCreateRequest(
+            canonical_handle=canonical_handle,
+            variants=variants,
+            dry_run=False,
+        )
+
+        result = await create_damaged_product_with_duplicate_check(data)
+        results.append(result)
+
+    return results
 
 def _normalize_condition_from_title(title: str | None) -> str | None:
     """
@@ -259,6 +514,15 @@ async def create_damaged_product_with_duplicate_check(
           price_override: optional float (percentage OFF; 0.25 == 25% off)
       - compare_at_price is currently ignored at this phase.
     """
+
+    if data.inputs:
+        raise RuntimeError(
+            "create_damaged_product_with_duplicate_check does not accept inputs[]. "
+            "Use bulk-create preview handler."
+        )
+
+    if not data.canonical_handle or not data.canonical_handle.strip():
+        raise ValueError("canonical_handle is required for single-create path")
 
     # Build a quick lookup map for variant seeds keyed by condition
     seed_by_condition: dict[str, VariantSeed] = {}

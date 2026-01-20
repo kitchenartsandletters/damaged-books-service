@@ -1,4 +1,3 @@
-# backend/app/admin_routes.py
 import os
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header, Query, Response
@@ -8,7 +7,7 @@ from services.cron_service import reconcile_damaged_inventory
 from services.supabase_client import get_client
 from services.damaged_inventory_repo import list_view
 from services import product_service
-from .schemas import DuplicateCheckRequest, BulkCreateRequest, BulkCreateResult
+from .schemas import DuplicateCheckRequest, BulkCreateRequest, BulkCreateResult, BulkCreateConfirmRequest
 from services.creation_log_service import log_creation_event
 import logging
 
@@ -103,36 +102,111 @@ async def bulk_preview(
 
     return JSONResponse({"results": results})
 
-@router.post("/bulk-create")
-async def bulk_create(
+@router.post("/bulk-create/preview")
+async def bulk_create_preview(
     payload: BulkCreateRequest,
     ok: bool = Depends(require_admin_token),
 ):
     """
-    Damaged Books Service — single canonical → damaged product creator.
+    Damaged Books Service — Bulk Create PREVIEW ONLY.
 
-    Input: BulkCreateRequest
-      - canonical_handle (required)
-      - canonical_title (optional hint; canonical title is ultimately pulled from Shopify)
-      - isbn / barcode (optional; currently not used for matching)
-      - variants: optional list of VariantSeed with:
-          * condition: "light" | "moderate" | "heavy"
-          * quantity: optional int (reported back as quantity_set; no inventory writes yet)
-          * price_override: optional float (fraction OFF; 0.25 == 25% off)
-      - dry_run: if True, run checks and return a preview without creating anything in Shopify.
+    Accepts:
+      - inputs[] + inventory
 
-    Behavior:
-      - runs check_damaged_duplicate() using canonical_handle + derived damaged handle
-      - honors dry_run flag
-      - creates one damaged product with 3 condition variants
-      - logs to damaged.creation_log via creation_log_service.log_creation_event()
+    Returns:
+      - preview rows only
+      - no Shopify writes
+      - no Supabase writes
     """
 
-    # Delegate all business logic to the service layer
-    result: BulkCreateResult = await product_service.create_damaged_product_with_duplicate_check(payload)
+    # ----------------------------
+    # HARD VALIDATION
+    # ----------------------------
+    if not payload.inputs:
+        raise HTTPException(
+            status_code=422,
+            detail="inputs[] is required for bulk preview"
+        )
 
-    # Pydantic model → dict for JSONResponse
-    return JSONResponse(result.model_dump())
+    if payload.canonical_handle:
+        raise HTTPException(
+            status_code=422,
+            detail="canonical_handle is not allowed for bulk preview"
+        )
+
+    if not payload.inventory:
+        raise HTTPException(
+            status_code=422,
+            detail="inventory is required for bulk preview"
+        )
+
+    # ----------------------------
+    # RESOLUTION
+    # ----------------------------
+    try:
+        resolved = await product_service.resolve_bulk_inputs(payload.inputs)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.exception("[Admin] bulk-create preview resolution failed")
+        raise HTTPException(status_code=500, detail="Failed to resolve inputs")
+
+    # ----------------------------
+    # PREVIEW CONSTRUCTION (PURE)
+    # ----------------------------
+    try:
+        preview_rows = product_service.compute_damaged_variant_preview(
+            resolved=resolved,
+            inventory=payload.inventory,
+        )
+    except Exception as e:
+        logger.exception("[Admin] bulk-create preview build failed")
+        raise HTTPException(status_code=500, detail="Failed to build preview")
+
+    logger.info(
+        "[Admin] /admin/bulk-create/preview rows=%s",
+        len(preview_rows),
+    )
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "preview": preview_rows,
+            "meta": {"count": len(preview_rows)},
+        }
+    )
+
+@router.post("/bulk-create")
+async def bulk_create(
+    payload: BulkCreateConfirmRequest,
+    ok: bool = Depends(require_admin_token),
+):
+    """
+    Damaged Books Service — Bulk Create CONFIRM.
+
+    Executes preview-derived confirm payloads only.
+    """
+
+    if not payload.items:
+        raise HTTPException(
+            status_code=422,
+            detail="items[] is required"
+        )
+
+    # Additional per-item validation/logging
+    for idx, item in enumerate(payload.items):
+        if not hasattr(item, "canonical_handle") or not hasattr(item, "damaged_handle"):
+            logger.warning(f"[Admin] bulk-create confirm item at index {idx} missing required fields")
+            raise HTTPException(status_code=422, detail=f"Item at index {idx} missing required fields")
+
+    try:
+        # Fix: use correct function name create_damaged_from_preview_items
+        result = await product_service.create_damaged_from_preview_items(payload.items)
+    except Exception as e:
+        logger.exception("[Admin] /admin/bulk-create failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return JSONResponse(result)
 
 @router.get("/creation-log")
 async def get_creation_log(
