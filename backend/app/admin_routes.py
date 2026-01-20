@@ -160,6 +160,7 @@ async def bulk_create_preview(
         for r in resolved:
 
             rows = product_service.compute_damaged_variant_preview(
+                canonical_product_id=r["product_id"],
                 canonical_handle=r["handle"],
                 canonical_variant=r["variant"],
                 inventory_seed=payload.inventory,

@@ -172,6 +172,7 @@ def _make_barcode_for_condition(canonical_handle: str, condition_key: str) -> st
 # Pure preview helper for damaged variant preview
 
 def compute_damaged_variant_preview(
+    canonical_product_id: str,
     canonical_handle: str,
     canonical_variant: dict,
     inventory_seed: InventorySeed,
@@ -192,6 +193,8 @@ def compute_damaged_variant_preview(
         price = f"{canonical_price * (1 - pct):.2f}"
 
         rows.append({
+            "canonical_product_id": canonical_product_id,
+            "canonical_handle": canonical_handle,
             "condition": cond_key,
             "title": meta["title"],
             "price": price,
@@ -199,7 +202,6 @@ def compute_damaged_variant_preview(
             "inventory_seed": getattr(inventory_seed, cond_key, 0),
             "sku": canonical_sku,
             "barcode": _make_barcode_for_condition(canonical_handle, cond_key),
-            "canonical_handle": canonical_handle,
         })
 
     return rows
