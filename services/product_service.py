@@ -10,9 +10,9 @@ from backend.app.schemas import (
     BulkCreateResult,
     VariantSeed,
     CreatedVariantInfo,
+    InventorySeed
 )
 from services.creation_log_service import log_creation_event
-from app.schemas import InventorySeed
 
 logger = logging.getLogger(__name__)
 
