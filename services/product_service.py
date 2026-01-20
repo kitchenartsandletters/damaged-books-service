@@ -12,6 +12,7 @@ from backend.app.schemas import (
     CreatedVariantInfo,
 )
 from services.creation_log_service import log_creation_event
+from app.schemas import InventorySeed
 
 logger = logging.getLogger(__name__)
 
