@@ -200,6 +200,7 @@ def compute_damaged_variant_preview(
             "inventory_seed": getattr(inventory_seed, cond_key, 0),
             "sku": canonical_sku,
             "barcode": _make_barcode_for_condition(canonical_handle, cond_key),
+            "canonical_handle": canonical_handle,
         })
 
     return rows

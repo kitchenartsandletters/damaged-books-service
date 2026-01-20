@@ -23,7 +23,8 @@ DBS works together with the **Webhook Gateway**, which ensures replayability, HM
 2. Gateway verifies HMAC, forwards raw body + headers
 3. DBS:
    - Re-verifies HMAC (defense-in-depth)
-   - Resolves variant + product using **GraphQL-first**  
+   - Resolves canonical product and variant identity using **Admin GraphQL (barcode / ISBN / product_id resolvers)**
+   - REST endpoints are used only for inventory-level mutations where GraphQL has no equivalent
    - Hydrates product once (no double fetches)
    - Extracts damaged condition from `selectedOptions`
    - Normalizes condition (`light`, `moderate`, `heavy`)
@@ -314,6 +315,12 @@ The preview endpoint (`/admin/bulk-create/preview`) returns duplicate conflicts 
 }
 ```
 
+All `inputs[]` values are resolved server-side using a GraphQL-first resolver.
+- `isbn` inputs are resolved via Admin GraphQL productVariants(barcode: ...)
+- `product_id` inputs are resolved via Admin GraphQL product(id: ...)
+- REST search endpoints are not used for canonical resolution
+If resolution yields zero or multiple canonical products, preview fails with a hard error.
+
 `canonical_handle` is deprecated and supported only for legacy testing. All resolution of input values happens server-side inside DBS.
 
 ## Endpoints
@@ -323,6 +330,9 @@ The preview endpoint (`/admin/bulk-create/preview`) returns duplicate conflicts 
 - `GET  /admin/creation-log`
 
 `POST /admin/bulk-create/preview` performs server-side resolution and validation only (no writes, no inventory mutation, and no logging side effects).
+
+Preview resolution is authoritative and verified against the live Shopify catalog.
+False-positive duplicate or multi-variant ISBN errors are explicitly prevented by GraphQL-based resolution.
 
 `/admin/bulk-create` is the confirm-only, irreversible step that performs creation and all side effects.
 
@@ -376,6 +386,7 @@ Guarantees:
 
 ### 7.3 Admin Dashboard Integration (Handoff Notes)
 
+
 The Admin Dashboard (AD) must treat DBS as an authoritative backend, not a helper API.
 
 Rules:
@@ -388,9 +399,22 @@ Required endpoints:
 - `POST /admin/bulk-create/preview`
 - `POST /admin/bulk-create` (confirm-only)
 
+
 The Bulk Create Wizard in AD mirrors this contract:
 - Preview = truth
 - Confirm = irreversible execution
+
+## 7.4 Canonical Resolution Guarantees
+
+DBS guarantees that all bulk creation workflows resolve against Shopify’s true source of truth.
+
+Resolution rules:
+- All ISBN / barcode lookups are performed using Admin GraphQL
+- Exactly one canonical product must be resolved
+- Multi-variant or ambiguous barcodes are rejected
+- Canonical handle is derived from the resolved product, never client-provided
+
+This design eliminates historical failure modes caused by REST search drift, stale indexes, or Shopify-side heuristics.
 
 # 8. Creation Log
 
@@ -549,6 +573,9 @@ No action is required unless:
 	•	Operational tooling requires immediate visibility guarantees.
 
 # 12. Manual Testing: cURL Bulk-Create Example
+
+⚠️ Note: The preview endpoint (`/admin/bulk-create/preview`) is now the required first step for all bulk creation testing.
+Legacy direct-create tests exist only for historical verification and should not be used for new workflows.
 
 **Note:** This legacy cURL example uses the deprecated `canonical_handle` path. Bulk workflows must now use `inputs[]` plus the preview → confirm flow.
 
