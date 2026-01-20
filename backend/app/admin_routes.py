@@ -155,10 +155,16 @@ async def bulk_create_preview(
     # PREVIEW CONSTRUCTION (PURE)
     # ----------------------------
     try:
-        preview_rows = product_service.compute_damaged_variant_preview(
-            resolved=resolved,
-            inventory=payload.inventory,
-        )
+        preview_rows = []
+
+        for r in resolved:
+
+            rows = product_service.compute_damaged_variant_preview(
+                canonical_handle=r["handle"],
+                canonical_variant=r["variant"],
+                inventory_seed=payload.inventory,
+            )
+            preview_rows.extend(rows)
     except Exception as e:
         logger.exception("[Admin] bulk-create preview build failed")
         raise HTTPException(status_code=500, detail="Failed to build preview")
