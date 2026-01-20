@@ -3,7 +3,10 @@
 import logging
 import os
 from datetime import datetime
-from services.shopify_client import shopify_client
+from services.shopify_client import (
+    shopify_client,
+    get_product_by_id_gql,
+)
 from services.supabase_client import get_client
 from backend.app.schemas import (
     BulkCreateRequest,
@@ -89,28 +92,19 @@ async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
                 raise ValueError(f"Failed to resolve product_id {value}: {e}")
 
         # --------------------------------------------------
-        # Resolve by ISBN / barcode
+        # Resolve by ISBN / barcode (GraphQL only)
         # --------------------------------------------------
         elif itype == "isbn":
             try:
-                resp = await shopify_client.get(
-                    "variants.json",
-                    query={"barcode": value, "limit": 5},
-                )
-                variants = resp.get("body", {}).get("variants", []) or []
-
-                if not variants:
-                    raise ValueError(f"No variant found with barcode/ISBN {value}")
-
-                if len(variants) > 1:
-                    raise ValueError(f"Multiple variants found with barcode/ISBN {value}")
-
-                variant = variants[0]
-                product_id = variant.get("product_id")
+                # Use GraphQL resolver for barcode/ISBN
+                resolved = await shopify_client.resolve_product_by_barcode_gql(value)
+                if resolved is None:
+                    raise ValueError(f"No product found with barcode/ISBN {value}")
+                # resolved is a single dict with a canonical product_id
+                product_id = resolved.get("product_id")
                 if not product_id:
-                    raise ValueError(f"Variant {variant.get('id')} missing product_id")
-
-                product = await get_product_by_id(str(product_id))
+                    raise ValueError(f"Resolved variant missing product_id for barcode/ISBN {value}")
+                product = await get_product_by_id_gql(str(product_id))
             except Exception as e:
                 raise ValueError(f"Failed to resolve ISBN {value}: {e}")
 

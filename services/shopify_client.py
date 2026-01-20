@@ -448,4 +448,86 @@ class ShopifyClient:
         # Not found
         return None
 
+    async def resolve_product_by_barcode_gql(self, barcode: str, first: int = 10) -> dict | None:
+        """
+        Resolve a canonical product by barcode/ISBN using GraphQL only.
+
+        Rules:
+        - Query productVariants by barcode
+        - Deduplicate by product.id
+        - If zero products -> return None
+        - If more than one distinct product -> raise ValueError (ambiguous)
+        - If exactly one product -> return normalized product info
+
+        Returns:
+          {
+            "product_id": "<numeric>",
+            "product_gid": "<gid>",
+            "handle": "<handle>",
+            "title": "<title>",
+            "variant_gid": "<gid>"
+          }
+        """
+        query = """
+        query($q: String!, $first: Int!) {
+          productVariants(query: $q, first: $first) {
+            edges {
+              node {
+                id
+                barcode
+                product {
+                  id
+                  handle
+                  title
+                  status
+                }
+              }
+            }
+          }
+        }
+        """
+        variables = {
+            "q": f"barcode:{barcode}",
+            "first": first,
+        }
+
+        data = await self.graphql(query, variables)
+        edges = (data or {}).get("data", {}).get("productVariants", {}).get("edges", []) or []
+
+        if not edges:
+            logger.info(f"[ShopifyClient:GQL] No variants found for barcode={barcode}")
+            return None
+
+        # Deduplicate by product GID
+        products: dict[str, dict] = {}
+        for edge in edges:
+            node = edge.get("node") or {}
+            product = node.get("product") or {}
+            prod_gid = product.get("id")
+            if not prod_gid:
+                continue
+
+            if prod_gid not in products:
+                products[prod_gid] = {
+                    "product_gid": prod_gid,
+                    "product_id": prod_gid.rsplit("/", 1)[-1],
+                    "handle": product.get("handle"),
+                    "title": product.get("title"),
+                    "variant_gid": node.get("id"),
+                }
+
+        if len(products) > 1:
+            handles = [p.get("handle") for p in products.values()]
+            raise ValueError(
+                f"Ambiguous barcode {barcode}: matches multiple products {handles}"
+            )
+
+        resolved = next(iter(products.values()))
+        logger.info(
+            f"[ShopifyClient:GQL] Resolved barcode={barcode} "
+            f"→ product_id={resolved['product_id']} handle={resolved['handle']}"
+        )
+        return resolved
+    
 shopify_client = ShopifyClient()
+# Singleton instance
