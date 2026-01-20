@@ -3,10 +3,7 @@
 import logging
 import os
 from datetime import datetime
-from services.shopify_client import (
-    shopify_client,
-    get_product_by_id_gql,
-)
+from services.shopify_client import shopify_client
 from services.supabase_client import get_client
 from backend.app.schemas import (
     BulkCreateRequest,
@@ -104,7 +101,7 @@ async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
                 product_id = resolved.get("product_id")
                 if not product_id:
                     raise ValueError(f"Resolved variant missing product_id for barcode/ISBN {value}")
-                product = await get_product_by_id_gql(str(product_id))
+                product = await shopify_client.get_product_by_id_gql(str(product_id))
             except Exception as e:
                 raise ValueError(f"Failed to resolve ISBN {value}: {e}")
 
