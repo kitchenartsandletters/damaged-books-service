@@ -72,8 +72,8 @@ CONDITION_META = {
 
 # Fetch a full product by GID — used for barcode and direct product-ID paths.
 # Only requests fields actually needed by the service layer.
-# compareAtPrice / inventoryManagement / inventoryPolicy are intentionally
-# omitted — they are either unused or hardcoded in create_damaged_pair.
+# Note: weight/weightUnit moved from ProductVariant to
+# inventoryItem.measurement.weight in Shopify Admin API 2025-01.
 _CANONICAL_PRODUCT_QUERY = """
 query GetCanonicalProduct($id: ID!) {
   product(id: $id) {
@@ -95,8 +95,14 @@ query GetCanonicalProduct($id: ID!) {
           price
           sku
           barcode
-          weight
-          weightUnit
+          inventoryItem {
+            measurement {
+              weight {
+                value
+                unit
+              }
+            }
+          }
         }
       }
     }
@@ -128,8 +134,14 @@ query GetVariantParentProduct($id: ID!) {
             price
             sku
             barcode
-            weight
-            weightUnit
+            inventoryItem {
+              measurement {
+                weight {
+                  value
+                  unit
+                }
+              }
+            }
           }
         }
       }
@@ -176,14 +188,23 @@ def _normalize_gql_product(gql_product: dict) -> dict:
     variants: list[dict] = []
     for edge in ((gql_product.get("variants") or {}).get("edges") or []):
         node = edge.get("node") or {}
-        weight_unit_raw = (node.get("weightUnit") or "").upper()
+
+        # Weight moved from ProductVariant.weight/weightUnit to
+        # ProductVariant.inventoryItem.measurement.weight in API 2025-01
+        weight_node = (
+            (node.get("inventoryItem") or {})
+            .get("measurement") or {}
+        ).get("weight") or {}
+        weight_value    = weight_node.get("value")
+        weight_unit_raw = (weight_node.get("unit") or "").upper()
+
         variants.append({
             "id":                   str(node.get("id") or "").split("/")[-1],
             "price":                node.get("price"),
             "compare_at_price":     node.get("compareAtPrice"),
             "sku":                  node.get("sku"),
             "barcode":              node.get("barcode"),
-            "weight":               node.get("weight"),
+            "weight":               weight_value,
             "weight_unit":          _WEIGHT_UNIT_MAP.get(weight_unit_raw, weight_unit_raw.lower() or "g"),
             "inventory_management": (node.get("inventoryManagement") or "shopify").lower(),
             "inventory_policy":     (node.get("inventoryPolicy") or "deny").lower(),
