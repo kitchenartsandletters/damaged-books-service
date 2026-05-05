@@ -71,6 +71,9 @@ CONDITION_META = {
 # ---------------------------------------------------------------------------
 
 # Fetch a full product by GID — used for barcode and direct product-ID paths.
+# Only requests fields actually needed by the service layer.
+# compareAtPrice / inventoryManagement / inventoryPolicy are intentionally
+# omitted — they are either unused or hardcoded in create_damaged_pair.
 _CANONICAL_PRODUCT_QUERY = """
 query GetCanonicalProduct($id: ID!) {
   product(id: $id) {
@@ -90,13 +93,10 @@ query GetCanonicalProduct($id: ID!) {
         node {
           id
           price
-          compareAtPrice
           sku
           barcode
           weight
           weightUnit
-          inventoryManagement
-          inventoryPolicy
         }
       }
     }
@@ -126,13 +126,10 @@ query GetVariantParentProduct($id: ID!) {
           node {
             id
             price
-            compareAtPrice
             sku
             barcode
             weight
             weightUnit
-            inventoryManagement
-            inventoryPolicy
           }
         }
       }
@@ -208,11 +205,31 @@ async def _fetch_product_by_gid(product_gid: str) -> dict | None:
     """
     Fetch and normalize a canonical product by its GID.
     Returns None if the product is not found or GQL returns no data.
+
+    IMPORTANT: Always logs GQL-level errors (HTTP 200 with errors[] in body)
+    so that misconfigured queries or permission issues surface in logs rather
+    than silently returning None.
     """
     resp = await shopify_client.graphql(_CANONICAL_PRODUCT_QUERY, {"id": product_gid})
     body = resp.get("body", resp)
+
+    # Surface GQL errors — these return HTTP 200 but have an errors[] key
+    gql_errors = body.get("errors") or []
+    if gql_errors:
+        logger.warning(
+            "[BulkResolve] GQL errors fetching product %s: %s",
+            product_gid, gql_errors,
+        )
+
     gql_product = (body.get("data") or {}).get("product") or {}
     if not gql_product:
+        logger.warning(
+            "[BulkResolve] GQL returned no product data for %s "
+            "(errors=%s, data=%s)",
+            product_gid,
+            gql_errors or "none",
+            body.get("data"),
+        )
         return None
     return _normalize_gql_product(gql_product)
 
