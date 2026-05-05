@@ -65,11 +65,12 @@ CONDITION_META = {
 # --------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# GraphQL query used exclusively by resolve_bulk_inputs.
-# This is an explicit, self-contained query so we know exactly which fields
-# are requested — avoids depending on whatever get_product_by_id_gql selects.
+# GraphQL queries used exclusively by resolve_bulk_inputs.
+# Explicit, self-contained queries so we own the selection set and can
+# guarantee price, weight, and all other required fields are present.
 # ---------------------------------------------------------------------------
 
+# Fetch a full product by GID — used for barcode and direct product-ID paths.
 _CANONICAL_PRODUCT_QUERY = """
 query GetCanonicalProduct($id: ID!) {
   product(id: $id) {
@@ -103,7 +104,44 @@ query GetCanonicalProduct($id: ID!) {
 }
 """
 
-# Shopify GQL WeightUnit enum → REST-compatible unit string
+# Fetch a product variant by GID and return its parent product.
+# Used when the user enters a Shopify variant ID directly.
+_VARIANT_TO_PRODUCT_QUERY = """
+query GetVariantParentProduct($id: ID!) {
+  productVariant(id: $id) {
+    product {
+      id
+      handle
+      title
+      vendor
+      productType
+      tags
+      images(first: 1) {
+        edges {
+          node { url }
+        }
+      }
+      variants(first: 3) {
+        edges {
+          node {
+            id
+            price
+            compareAtPrice
+            sku
+            barcode
+            weight
+            weightUnit
+            inventoryManagement
+            inventoryPolicy
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+# Shopify GQL WeightUnit enum → service-layer unit string
 _WEIGHT_UNIT_MAP: dict[str, str] = {
     "GRAMS":      "g",
     "KILOGRAMS":  "kg",
@@ -117,11 +155,11 @@ def _normalize_gql_product(gql_product: dict) -> dict:
     Normalize a Shopify Admin GraphQL product node into a flat shape
     compatible with the rest of the service layer.
 
-    Key differences vs REST:
-      - GQL tags  → list of strings;  REST → comma-separated string
-      - GQL variants → edges/node connection; REST → flat list
-      - GQL weightUnit → GRAMS/KILOGRAMS enum; REST → g/kg
-      - GQL images → edges/node connection; REST → flat list with src key
+    Key differences from REST:
+      - GQL tags     → list of strings;       normalized → comma-separated string
+      - GQL variants → edges/node connection; normalized → flat list
+      - GQL weightUnit → GRAMS/KILOGRAMS;     normalized → g/kg
+      - GQL images   → edges/node connection; normalized → [{src: url}]
     """
     if not gql_product:
         return {}
@@ -166,6 +204,19 @@ def _normalize_gql_product(gql_product: dict) -> dict:
     }
 
 
+async def _fetch_product_by_gid(product_gid: str) -> dict | None:
+    """
+    Fetch and normalize a canonical product by its GID.
+    Returns None if the product is not found or GQL returns no data.
+    """
+    resp = await shopify_client.graphql(_CANONICAL_PRODUCT_QUERY, {"id": product_gid})
+    body = resp.get("body", resp)
+    gql_product = (body.get("data") or {}).get("product") or {}
+    if not gql_product:
+        return None
+    return _normalize_gql_product(gql_product)
+
+
 async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
     """
     Resolve BulkCreateInput[] → canonical Shopify products.
@@ -176,56 +227,92 @@ async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
       - Canonical product must have exactly one variant
       - Damaged / used products are invalid as inputs
 
-    ISBN path: barcode resolved via GraphQL (fast lookup), then a second
-    targeted GraphQL query fetches the full product including price, weight,
-    and weight_unit.  We use an explicit inline query (_CANONICAL_PRODUCT_QUERY)
-    rather than the shared get_product_by_id_gql so we own the selection set
-    and can guarantee all required fields are present.
+    Resolution cascade (tried in order until one succeeds):
+
+      1. Barcode / ISBN lookup — handles all barcode formats:
+           - ISBN-10 (10 digits)
+           - ISBN-13 (13 digits starting with 978/979)
+           - Internal / alphanumeric barcodes (e.g. DISFRUTARVOL2SP)
+           - Any other barcode stored on a Shopify variant
+
+      2. Shopify variant ID → parent product — for numeric values that are
+           variant IDs, not barcodes (e.g. 6846980325509).
+
+      3. Shopify product ID → direct product lookup — for numeric values
+           that are product IDs.
+
+    The `type` hint from the frontend is no longer used for routing; the
+    cascade tries all strategies automatically.
     """
 
     resolved: list[dict] = []
     seen_product_ids: set[str] = set()
 
     for inp in inputs:
-        itype = (inp.type or "").strip().lower()
         value = (inp.value or "").strip()
+        if not value:
+            continue
 
-        if itype not in ("isbn", "product_id"):
-            raise ValueError(f"Unsupported input type: {itype}")
-
-        logger.info("[BulkResolve] Resolving input type=%s value=%s", itype, value)
+        logger.info("[BulkResolve] Resolving '%s'", value)
 
         product: dict | None = None
+        strategies_tried: list[str] = []
 
-        if itype == "product_id" and len(value) >= 10:
-            raise ValueError(
-                f"Input '{value}' is too long to be a Shopify product_id; did you mean ISBN?"
-            )
+        # ── Strategy 1: barcode / ISBN lookup ─────────────────────────────
+        # Works for ISBN-10, ISBN-13, and any custom alphanumeric barcode.
+        try:
+            resolution = await shopify_client.resolve_product_by_barcode_gql(value)
+            if resolution:
+                product_id = resolution.get("product_id") or ""
+                # Strip GID prefix if resolve_product_by_barcode_gql returns
+                # a full GID string (e.g. "gid://shopify/Product/123") rather
+                # than a plain numeric ID.
+                raw_pid = str(product_id).split("/")[-1]
+                if raw_pid:
+                    product_gid = f"gid://shopify/Product/{raw_pid}"
+                    product = await _fetch_product_by_gid(product_gid)
+                    if product:
+                        logger.info("[BulkResolve] Resolved '%s' via barcode lookup", value)
+        except Exception as e:
+            logger.debug("[BulkResolve] Barcode strategy failed for '%s': %s", value, e)
+        strategies_tried.append("barcode")
 
-        elif itype == "isbn":
+        # ── Strategy 2: Shopify variant ID → parent product ───────────────
+        # Numeric values only. A 13-digit number like 6846980325509 that is
+        # a variant ID (not a barcode) will reach here after strategy 1 fails.
+        if not product and value.isdigit():
             try:
-                # Step 1: barcode → product_id (fast GQL lookup)
-                resolution = await shopify_client.resolve_product_by_barcode_gql(value)
-                if resolution is None:
-                    raise ValueError(f"No product found with barcode/ISBN {value}")
-                product_id = resolution.get("product_id")
-                if not product_id:
-                    raise ValueError(f"Resolved variant missing product_id for barcode/ISBN {value}")
-
-                # Step 2: full product via explicit GQL query (price, weight, etc.)
-                product_gid = f"gid://shopify/Product/{product_id}"
-                resp = await shopify_client.graphql(_CANONICAL_PRODUCT_QUERY, {"id": product_gid})
+                variant_gid = f"gid://shopify/ProductVariant/{value}"
+                resp = await shopify_client.graphql(
+                    _VARIANT_TO_PRODUCT_QUERY, {"id": variant_gid}
+                )
                 body = resp.get("body", resp)
-                gql_product = (body.get("data") or {}).get("product") or {}
-                if not gql_product:
-                    raise ValueError(f"Product GID {product_gid} returned no data")
-                product = _normalize_gql_product(gql_product)
-
+                gql_variant = (body.get("data") or {}).get("productVariant") or {}
+                gql_product  = gql_variant.get("product") or {}
+                if gql_product:
+                    product = _normalize_gql_product(gql_product)
+                    if product:
+                        logger.info("[BulkResolve] Resolved '%s' via variant ID → product", value)
             except Exception as e:
-                raise ValueError(f"Failed to resolve ISBN {value}: {e}")
+                logger.debug("[BulkResolve] Variant ID strategy failed for '%s': %s", value, e)
+            strategies_tried.append("variant_id")
+
+        # ── Strategy 3: Shopify product ID → direct product lookup ─────────
+        if not product and value.isdigit():
+            try:
+                product_gid = f"gid://shopify/Product/{value}"
+                product = await _fetch_product_by_gid(product_gid)
+                if product:
+                    logger.info("[BulkResolve] Resolved '%s' via product ID", value)
+            except Exception as e:
+                logger.debug("[BulkResolve] Product ID strategy failed for '%s': %s", value, e)
+            strategies_tried.append("product_id")
 
         if not product:
-            raise ValueError(f"Unable to resolve input {itype}:{value}")
+            raise ValueError(
+                f"Could not resolve '{value}' after trying: {', '.join(strategies_tried)}. "
+                "Check that the barcode, variant ID, or product ID is correct."
+            )
 
         handle = (product.get("handle") or "").lower()
 
