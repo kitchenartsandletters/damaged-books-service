@@ -64,6 +64,108 @@ CONDITION_META = {
 # Bulk input resolver for canonical products
 # --------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# GraphQL query used exclusively by resolve_bulk_inputs.
+# This is an explicit, self-contained query so we know exactly which fields
+# are requested — avoids depending on whatever get_product_by_id_gql selects.
+# ---------------------------------------------------------------------------
+
+_CANONICAL_PRODUCT_QUERY = """
+query GetCanonicalProduct($id: ID!) {
+  product(id: $id) {
+    id
+    handle
+    title
+    vendor
+    productType
+    tags
+    images(first: 1) {
+      edges {
+        node { url }
+      }
+    }
+    variants(first: 3) {
+      edges {
+        node {
+          id
+          price
+          compareAtPrice
+          sku
+          barcode
+          weight
+          weightUnit
+          inventoryManagement
+          inventoryPolicy
+        }
+      }
+    }
+  }
+}
+"""
+
+# Shopify GQL WeightUnit enum → REST-compatible unit string
+_WEIGHT_UNIT_MAP: dict[str, str] = {
+    "GRAMS":      "g",
+    "KILOGRAMS":  "kg",
+    "OUNCES":     "oz",
+    "POUNDS":     "lb",
+}
+
+
+def _normalize_gql_product(gql_product: dict) -> dict:
+    """
+    Normalize a Shopify Admin GraphQL product node into a flat shape
+    compatible with the rest of the service layer.
+
+    Key differences vs REST:
+      - GQL tags  → list of strings;  REST → comma-separated string
+      - GQL variants → edges/node connection; REST → flat list
+      - GQL weightUnit → GRAMS/KILOGRAMS enum; REST → g/kg
+      - GQL images → edges/node connection; REST → flat list with src key
+    """
+    if not gql_product:
+        return {}
+
+    # ── Tags ──────────────────────────────────────────────────────────────
+    raw_tags = gql_product.get("tags") or []
+    tags_str = ", ".join(raw_tags) if isinstance(raw_tags, list) else str(raw_tags)
+
+    # ── Images ────────────────────────────────────────────────────────────
+    images: list[dict] = []
+    for edge in ((gql_product.get("images") or {}).get("edges") or []):
+        url = (edge.get("node") or {}).get("url")
+        if url:
+            images.append({"src": url})
+
+    # ── Variants ──────────────────────────────────────────────────────────
+    variants: list[dict] = []
+    for edge in ((gql_product.get("variants") or {}).get("edges") or []):
+        node = edge.get("node") or {}
+        weight_unit_raw = (node.get("weightUnit") or "").upper()
+        variants.append({
+            "id":                   str(node.get("id") or "").split("/")[-1],
+            "price":                node.get("price"),
+            "compare_at_price":     node.get("compareAtPrice"),
+            "sku":                  node.get("sku"),
+            "barcode":              node.get("barcode"),
+            "weight":               node.get("weight"),
+            "weight_unit":          _WEIGHT_UNIT_MAP.get(weight_unit_raw, weight_unit_raw.lower() or "g"),
+            "inventory_management": (node.get("inventoryManagement") or "shopify").lower(),
+            "inventory_policy":     (node.get("inventoryPolicy") or "deny").lower(),
+        })
+
+    return {
+        "id":           str(gql_product.get("id") or "").split("/")[-1],
+        "handle":       gql_product.get("handle") or "",
+        "title":        gql_product.get("title") or "",
+        "vendor":       gql_product.get("vendor"),
+        "product_type": gql_product.get("productType"),
+        "tags":         tags_str,
+        "images":       images,
+        "variants":     variants,
+    }
+
+
 async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
     """
     Resolve BulkCreateInput[] → canonical Shopify products.
@@ -73,6 +175,12 @@ async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
       - Canonical product must exist
       - Canonical product must have exactly one variant
       - Damaged / used products are invalid as inputs
+
+    ISBN path: barcode resolved via GraphQL (fast lookup), then a second
+    targeted GraphQL query fetches the full product including price, weight,
+    and weight_unit.  We use an explicit inline query (_CANONICAL_PRODUCT_QUERY)
+    rather than the shared get_product_by_id_gql so we own the selection set
+    and can guarantee all required fields are present.
     """
 
     resolved: list[dict] = []
@@ -96,13 +204,23 @@ async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
 
         elif itype == "isbn":
             try:
+                # Step 1: barcode → product_id (fast GQL lookup)
                 resolution = await shopify_client.resolve_product_by_barcode_gql(value)
                 if resolution is None:
                     raise ValueError(f"No product found with barcode/ISBN {value}")
                 product_id = resolution.get("product_id")
                 if not product_id:
                     raise ValueError(f"Resolved variant missing product_id for barcode/ISBN {value}")
-                product = await shopify_client.get_product_by_id_gql(str(product_id))
+
+                # Step 2: full product via explicit GQL query (price, weight, etc.)
+                product_gid = f"gid://shopify/Product/{product_id}"
+                resp = await shopify_client.graphql(_CANONICAL_PRODUCT_QUERY, {"id": product_gid})
+                body = resp.get("body", resp)
+                gql_product = (body.get("data") or {}).get("product") or {}
+                if not gql_product:
+                    raise ValueError(f"Product GID {product_gid} returned no data")
+                product = _normalize_gql_product(gql_product)
+
             except Exception as e:
                 raise ValueError(f"Failed to resolve ISBN {value}: {e}")
 
@@ -110,6 +228,24 @@ async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
             raise ValueError(f"Unable to resolve input {itype}:{value}")
 
         handle = (product.get("handle") or "").lower()
+
+        # ── Handle sanitization ───────────────────────────────────────────────
+        # Shopify automatically prefixes handles with "copy-of-" when a product
+        # is duplicated in the admin. This prefix must be stripped before use:
+        # it would otherwise propagate into the damaged handle
+        # (e.g. "copy-of-foo-damaged" instead of "foo-damaged").
+        # Log a warning so the admin knows the canonical product handle needs
+        # correcting in Shopify.
+        if handle.startswith("copy-of-"):
+            original_handle = handle
+            handle = handle[len("copy-of-"):]
+            logger.warning(
+                "[BulkResolve] Stripped 'copy-of-' prefix: '%s' → '%s'. "
+                "The canonical product handle should be corrected in Shopify Admin "
+                "to avoid this sanitization being required.",
+                original_handle,
+                handle,
+            )
 
         raw_tags = product.get("tags") or ""
         tags = [t.strip().lower() for t in raw_tags.split(",") if t.strip()]
@@ -134,10 +270,12 @@ async def resolve_bulk_inputs(inputs: list[BulkCreateInput]) -> list[dict]:
         seen_product_ids.add(pid)
 
         logger.info(
-            "[BulkResolve] Canonical resolved: product_id=%s handle=%s title=%s",
+            "[BulkResolve] Canonical resolved: product_id=%s handle=%s title=%s price=%s weight=%s",
             product.get("id"),
             handle,
             product.get("title"),
+            (variants[0] or {}).get("price"),
+            (variants[0] or {}).get("weight"),
         )
 
         resolved.append(
