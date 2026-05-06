@@ -113,11 +113,18 @@ async def bulk_create_preview(
     try:
         preview_rows = []
         for r in resolved:
+            # Check if a damaged product already exists for this canonical.
+            # Passing the result into compute_damaged_variant_preview enriches
+            # each row with existing_qty, new_total, and action = "update".
+            damaged_handle = f"{r['handle']}-damaged"
+            existing_inventory = await product_service.fetch_existing_damaged_inventory(damaged_handle)
+
             rows = product_service.compute_damaged_variant_preview(
                 canonical_product_id=r["product_id"],
                 canonical_handle=r["handle"],
                 canonical_variant=r["variant"],
                 inventory_seed=payload.inventory,
+                existing_inventory=existing_inventory,
             )
             preview_rows.extend(rows)
     except Exception:

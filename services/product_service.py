@@ -428,39 +428,117 @@ def compute_damaged_variant_preview(
     canonical_handle: str,
     canonical_variant: dict,
     inventory_seed: InventorySeed,
+    existing_inventory: dict | None = None,
 ) -> list[dict]:
     """
     Pure function: derive damaged variant preview rows.
     NO Shopify calls. NO side effects.
+
+    existing_inventory: result of fetch_existing_damaged_inventory(), or None
+    for fresh creates. When provided, each row includes:
+      - action:       "update" (product exists) vs "create" (new)
+      - existing_qty: current stock for that condition
+      - new_total:    existing_qty + inventory_seed (what will result after confirm)
     """
 
     canonical_price = float(canonical_variant.get("price") or 0)
     canonical_sku = canonical_variant.get("sku")
+    is_update = existing_inventory is not None
+    by_cond = (existing_inventory or {}).get("by_condition", {})
 
     rows = []
 
     for cond_key, meta in CONDITION_META.items():
         pct = meta["default_discount"]
         price = f"{canonical_price * (1 - pct):.2f}"
+        seed_qty = getattr(inventory_seed, cond_key, 0)
+        existing_qty = by_cond.get(cond_key, {}).get("qty", 0) if is_update else 0
 
         rows.append({
             "canonical_product_id": canonical_product_id,
-            "canonical_handle": canonical_handle,
-            "condition": cond_key,
-            "title": meta["title"],
-            "price": price,
-            "discount_pct": pct,
-            "inventory_seed": getattr(inventory_seed, cond_key, 0),
-            "sku": canonical_sku,
-            "barcode": _make_barcode_for_condition(canonical_handle, cond_key),
+            "canonical_handle":     canonical_handle,
+            "condition":            cond_key,
+            "title":                meta["title"],
+            "price":                price,
+            "discount_pct":         pct,
+            "inventory_seed":       seed_qty,
+            "sku":                  canonical_sku,
+            "barcode":              _make_barcode_for_condition(canonical_handle, cond_key),
+            # Enrichment fields — populated when damaged product already exists
+            "action":               "update" if is_update else "create",
+            "existing_qty":         existing_qty,
+            "new_total":            existing_qty + seed_qty,
         })
 
     return rows
 
 
 # ---------------------------------------------------------------------------
-# Collection helper
+# Existing damaged inventory fetch (for preview enrichment)
 # ---------------------------------------------------------------------------
+
+_DAMAGED_INVENTORY_QUERY = """
+query GetDamagedInventory($handle: String!) {
+  productByHandle(handle: $handle) {
+    id
+    status
+    variants(first: 5) {
+      edges {
+        node {
+          id
+          title
+          inventoryQuantity
+          inventoryItem { id }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+async def fetch_existing_damaged_inventory(damaged_handle: str) -> dict | None:
+    """
+    If a damaged product exists for the given handle, return:
+      {
+        "product_id": str,
+        "status": str,                       # "active" | "draft" | "archived"
+        "by_condition": {
+          "light":    {"qty": int, "variant_id": str, "inventory_item_id": str},
+          "moderate": {...},
+          "heavy":    {...},
+        }
+      }
+    Returns None if the product does not exist.
+    """
+    try:
+        resp = await shopify_client.graphql(_DAMAGED_INVENTORY_QUERY, {"handle": damaged_handle})
+        body = resp.get("body", resp)
+        product = (body.get("data") or {}).get("productByHandle") or {}
+        if not product:
+            return None
+
+        by_condition: dict[str, dict] = {}
+        for edge in ((product.get("variants") or {}).get("edges") or []):
+            node = edge.get("node") or {}
+            cond = _normalize_condition_from_title(node.get("title"))
+            if not cond:
+                continue
+            inv_item_id = ((node.get("inventoryItem") or {}).get("id") or "").split("/")[-1]
+            by_condition[cond] = {
+                "qty":               int(node.get("inventoryQuantity") or 0),
+                "variant_id":        str(node.get("id") or "").split("/")[-1],
+                "inventory_item_id": inv_item_id,
+            }
+
+        return {
+            "product_id": str(product.get("id") or "").split("/")[-1],
+            "status":     (product.get("status") or "").lower(),
+            "by_condition": by_condition,
+        }
+    except Exception as e:
+        logger.warning("[PreviewEnrich] Failed to fetch existing damaged inventory for '%s': %s", damaged_handle, e)
+        return None
 
 async def _add_to_damaged_collection(product_id: str) -> None:
     """
@@ -768,100 +846,148 @@ async def _set_product_category(product_id: str) -> None:
 # Inventory update for already-existing damaged products
 # ---------------------------------------------------------------------------
 
+_ADJUST_INVENTORY_MUTATION = """
+mutation AdjustInventory($input: InventoryAdjustQuantitiesInput!) {
+  inventoryAdjustQuantities(input: $input) {
+    userErrors { field message }
+    inventoryAdjustmentGroup {
+      changes {
+        name
+        delta
+        quantityAfterChange
+        item { id }
+      }
+    }
+  }
+}
+"""
+
+
 async def _update_existing_damaged_inventory(
     canonical_handle: str,
     inventory: dict,  # {"light": int, "moderate": int, "heavy": int}
 ) -> BulkCreateResult:
     """
-    Update inventory quantities on an already-existing damaged product.
-    Also adds the product to the damaged-books collection if any variant is in stock.
-    """
-    damaged_handle = f"{canonical_handle}-damaged"
-    damaged = await find_existing_by_handle(damaged_handle)
+    Add inventory quantities to an already-existing damaged product.
 
-    if not damaged:
+    Uses inventoryAdjustQuantities (GQL delta mutation) — ADDS the requested
+    quantities on top of whatever currently exists. Never overwrites.
+
+    Also publishes (if draft) and adds to damaged-books collection when any
+    variant ends up in stock.
+    """
+    if SHOPIFY_LOCATION_ID is None:
+        raise RuntimeError(
+            "SHOPIFY_LOCATION_ID / DBS_SHOPIFY_LOCATION_ID not configured; "
+            "cannot update inventory."
+        )
+
+    location_gid = f"gid://shopify/Location/{SHOPIFY_LOCATION_ID}"
+    damaged_handle = f"{canonical_handle}-damaged"
+
+    # Fetch current damaged product with inventory item IDs via GQL
+    existing = await fetch_existing_damaged_inventory(damaged_handle)
+    if not existing:
         raise RuntimeError(f"Damaged product not found for handle '{damaged_handle}'")
 
-    damaged_id = str(damaged.get("id"))
-    updated_variants: list[CreatedVariantInfo] = []
+    damaged_id     = existing["product_id"]
+    by_condition   = existing["by_condition"]
+    current_status = existing["status"]
 
-    for v in damaged.get("variants", []) or []:
-        variant_id = str(v.get("id"))
-        cond_key = _normalize_condition_from_title(v.get("title"))
+    # Build delta changes — one per condition where delta > 0
+    changes: list[dict] = []
+    result_variants: list[CreatedVariantInfo] = []
 
-        if not cond_key:
+    for cond_key, delta in inventory.items():
+        delta = int(delta or 0)
+        cond_data = by_condition.get(cond_key) or {}
+        inventory_item_id = cond_data.get("inventory_item_id")
+        current_qty = cond_data.get("qty", 0)
+        variant_id  = cond_data.get("variant_id")
+
+        if not inventory_item_id:
             logger.warning(
-                "[UpdateInventory] Could not determine condition for variant id=%s title=%s",
-                variant_id, v.get("title"),
+                "[UpdateInventory] No inventory_item_id for condition=%s handle=%s — skipping",
+                cond_key, damaged_handle,
             )
             continue
 
-        qty = int(inventory.get(cond_key) or 0)
-
-        if SHOPIFY_LOCATION_ID is not None:
-            try:
-                resp = await shopify_client.get(f"variants/{variant_id}.json")
-                variant_obj = resp.get("body", {}).get("variant") or {}
-                inventory_item_id = variant_obj.get("inventory_item_id")
-
-                if inventory_item_id:
-                    payload = {
-                        "location_id": SHOPIFY_LOCATION_ID,
-                        "inventory_item_id": int(inventory_item_id),
-                        "available": qty,
-                    }
-                    inv_resp = await shopify_client.post("inventory_levels/set.json", data=payload)
-                    status = inv_resp.get("status")
-                    if status and status >= 400:
-                        logger.warning(
-                            "[UpdateInventory] Set failed status=%s for variant=%s",
-                            status, variant_id,
-                        )
-                    else:
-                        logger.info(
-                            "[UpdateInventory] Set variant %s qty=%s at location %s",
-                            variant_id, qty, SHOPIFY_LOCATION_ID,
-                        )
-                else:
-                    logger.warning("[UpdateInventory] No inventory_item_id for variant %s", variant_id)
-            except Exception as e:
-                logger.warning("[UpdateInventory] Failed for variant=%s: %s", variant_id, e)
+        if delta > 0:
+            changes.append({
+                "inventoryItemId": f"gid://shopify/InventoryItem/{inventory_item_id}",
+                "locationId":      location_gid,
+                "delta":           delta,
+            })
+            logger.info(
+                "[UpdateInventory] Will add %s to condition=%s (currently %s → %s)",
+                delta, cond_key, current_qty, current_qty + delta,
+            )
         else:
-            logger.warning(
-                "[UpdateInventory] SHOPIFY_LOCATION_ID not set; skipping qty update for variant %s",
-                variant_id,
+            logger.info(
+                "[UpdateInventory] Skipping condition=%s — delta is 0",
+                cond_key,
             )
 
-        updated_variants.append(
+        result_variants.append(
             CreatedVariantInfo(
                 condition=cond_key,
                 variant_id=variant_id,
-                quantity_set=qty,
-                price=float(v.get("price") or 0),
-                sku=v.get("sku"),
-                barcode=v.get("barcode"),
-                inventory_management=v.get("inventory_management"),
-                inventory_policy=v.get("inventory_policy"),
+                quantity_set=current_qty + delta,
+                price=None,
+                sku=None,
+                barcode=None,
+                inventory_management="shopify",
+                inventory_policy="deny",
             )
         )
 
-    # Add to damaged-books collection if any variant is now in stock
-    if any(q > 0 for q in inventory.values()):
+    # Execute the delta mutation
+    if changes:
+        try:
+            resp = await shopify_client.graphql(
+                _ADJUST_INVENTORY_MUTATION,
+                {
+                    "input": {
+                        "reason":  "correction",
+                        "name":    "available",
+                        "changes": changes,
+                    }
+                },
+            )
+            body   = resp.get("body", resp)
+            result = (body.get("data") or {}).get("inventoryAdjustQuantities") or {}
+            errors = result.get("userErrors") or []
+
+            if errors:
+                logger.warning("[UpdateInventory] inventoryAdjustQuantities errors: %s", errors)
+            else:
+                adj_changes = (result.get("inventoryAdjustmentGroup") or {}).get("changes") or []
+                for ch in adj_changes:
+                    logger.info(
+                        "[UpdateInventory] Adjusted inventory_item=%s delta=%s → qty_after=%s",
+                        (ch.get("item") or {}).get("id", "?"),
+                        ch.get("delta"),
+                        ch.get("quantityAfterChange"),
+                    )
+        except Exception as e:
+            logger.warning("[UpdateInventory] inventoryAdjustQuantities failed: %s", e)
+    else:
+        logger.info("[UpdateInventory] No non-zero deltas — inventory unchanged for %s", damaged_handle)
+
+    # Publish + collection + category (same as fresh create path)
+    total_delta = sum(int(v or 0) for v in inventory.values())
+    if total_delta > 0:
         try:
             await _add_to_damaged_collection(damaged_id)
         except Exception as e:
             logger.warning("[Collection] Failed to add existing product to collection: %s", e)
 
-        # Publish to all channels — only when stock is being added.
-        # Guards against re-publishing a product that was intentionally taken offline.
-        current_status = (damaged.get("status") or "").lower()
         if current_status != "active":
             try:
                 await _publish_product(damaged_id)
             except Exception as e:
                 logger.warning("[Publish] Failed to publish existing product %s: %s", damaged_id, e)
 
-        # Set Print Books taxonomy category (idempotent)
         try:
             await _set_product_category(damaged_id)
         except Exception as e:
@@ -871,8 +997,12 @@ async def _update_existing_damaged_inventory(
         status="updated",
         damaged_product_id=damaged_id,
         damaged_handle=damaged_handle,
-        variants=updated_variants,
-        messages=["Existing damaged product inventory updated successfully."],
+        variants=result_variants,
+        messages=[
+            f"Inventory updated: added {sum(int(v or 0) for v in inventory.values())} cop"
+            f"{'y' if sum(int(v or 0) for v in inventory.values()) == 1 else 'ies'} across "
+            f"{sum(1 for v in inventory.values() if int(v or 0) > 0)} condition(s)."
+        ],
     )
 
 
