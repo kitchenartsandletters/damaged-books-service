@@ -37,10 +37,6 @@ DAMAGED_BOOKS_COLLECTION_GID = "gid://shopify/Collection/279535911045"
 # Set via productUpdate.category (NOT via collectionAddProducts).
 PRINT_BOOKS_TAXONOMY_GID = "gid://shopify/TaxonomyCategory/me-1-3"
 
-# Module-level cache for Shopify publication IDs (channels).
-# Populated lazily on first publish; avoids a query on every product creation.
-_publication_ids_cache: list[str] | None = None
-
 # ---------------------------------------------------------------------------
 # Variant helpers & condition metadata
 # ---------------------------------------------------------------------------
@@ -515,16 +511,31 @@ async def _add_to_damaged_collection(product_id: str) -> None:
 # Publication helpers
 # ---------------------------------------------------------------------------
 
-async def _get_publication_ids() -> list[str]:
+# Cache stores list of {id, name} dicts — never bare IDs — so logs always
+# show which channels are included. None = not yet fetched.
+_publication_ids_cache: list[dict] | None = None
+
+
+async def _get_publications() -> list[dict]:
     """
-    Return all Shopify sales channel publication IDs.
-    Result is cached at module level — queried at most once per process lifetime.
+    Return all Shopify sales channel publications as {id, name} dicts.
+
+    Two-step approach:
+      1. Query `publications(first: 20)` — returns app-accessible channels
+      2. Query `channel(handle: "online-store")` as an explicit fallback,
+         because the Online Store is a built-in channel that may not appear
+         in the publications list depending on app scopes/configuration.
+
+    Result is cached at module level for the process lifetime.
     """
     global _publication_ids_cache
     if _publication_ids_cache is not None:
         return _publication_ids_cache
 
-    query = """
+    pubs: list[dict] = []
+
+    # ── Step 1: all app-accessible publications ───────────────────────────
+    pubs_query = """
     query GetPublications {
       publications(first: 20) {
         edges {
@@ -534,37 +545,91 @@ async def _get_publication_ids() -> list[str]:
     }
     """
     try:
-        resp = await shopify_client.graphql(query, {})
+        resp = await shopify_client.graphql(pubs_query, {})
         body = resp.get("body", resp)
         edges = (body.get("data") or {}).get("publications", {}).get("edges") or []
-        ids = [
-            edge["node"]["id"]
-            for edge in edges
-            if (edge.get("node") or {}).get("id")
-        ]
-        _publication_ids_cache = ids
-        logger.info("[Publish] Cached %d publication channel(s): %s", len(ids), ids)
-        return ids
+        for edge in edges:
+            node = edge.get("node") or {}
+            if node.get("id") and node.get("name"):
+                pubs.append({"id": node["id"], "name": node["name"]})
     except Exception as e:
-        logger.warning("[Publish] Could not fetch publication IDs: %s", e)
-        return []
+        logger.warning("[Publish] publications query failed: %s", e)
+
+    # ── Step 2: explicit Online Store fallback ────────────────────────────
+    # The Online Store is a built-in Shopify channel. It may not appear in
+    # the publications query if the app's access scopes don't surface it.
+    # Query it directly by handle to ensure it's always included.
+    known_ids = {p["id"] for p in pubs}
+    online_store_query = """
+    query GetOnlineStorePublication {
+      publication(id: null) { id }
+      channels(first: 5) {
+        edges {
+          node {
+            id
+            name
+            handle
+            publication { id }
+          }
+        }
+      }
+    }
+    """
+    # Cleaner approach: publications can also be found via channel handle
+    online_store_pub_query = """
+    query GetChannels {
+      channels(first: 10) {
+        edges {
+          node {
+            name
+            handle
+            publication { id }
+          }
+        }
+      }
+    }
+    """
+    try:
+        resp = await shopify_client.graphql(online_store_pub_query, {})
+        body = resp.get("body", resp)
+        ch_edges = (body.get("data") or {}).get("channels", {}).get("edges") or []
+        for edge in ch_edges:
+            node = edge.get("node") or {}
+            pub  = node.get("publication") or {}
+            pub_id   = pub.get("id")
+            pub_name = node.get("name") or node.get("handle") or "unknown"
+            if pub_id and pub_id not in known_ids:
+                pubs.append({"id": pub_id, "name": pub_name})
+                known_ids.add(pub_id)
+                logger.info("[Publish] Added channel '%s' via channels query: %s", pub_name, pub_id)
+    except Exception as e:
+        logger.warning("[Publish] channels query failed: %s", e)
+
+    _publication_ids_cache = pubs
+    logger.info(
+        "[Publish] Cached %d publication(s): %s",
+        len(pubs),
+        [(p["name"], p["id"]) for p in pubs],
+    )
+    return pubs
 
 
 async def _publish_product(product_id: str) -> None:
     """
     Publish a damaged product to all sales channels.
 
-    Two-step approach:
-      1. productUpdate → status: ACTIVE   (covers Online Store channel)
-      2. publishablePublish               (covers POS and any other connected channels)
+    Approach:
+      1. productUpdate → status: ACTIVE  (marks product non-draft in Shopify)
+      2. publishablePublish with every publication ID from _get_publications()
+         — covers Online Store, POS, and any other connected channels.
 
-    Both calls are best-effort — errors are logged and swallowed so they never
-    block the main creation flow.
+    All calls are best-effort: errors are logged and swallowed so they
+    never block the main creation flow.
     """
     raw_id = str(product_id).split("/")[-1]
     product_gid = f"gid://shopify/Product/{raw_id}"
 
-    # ── Step 1: Activate (Online Store) ──────────────────────────────────────
+    # ── Step 1: set status ACTIVE ─────────────────────────────────────────
     activate_mutation = """
     mutation ActivateProduct($input: ProductInput!) {
       productUpdate(input: $input) {
@@ -582,15 +647,26 @@ async def _publish_product(product_id: str) -> None:
         if errors:
             logger.warning("[Publish] productUpdate errors for %s: %s", product_gid, errors)
         else:
-            logger.info("[Publish] Set status=ACTIVE for %s", product_gid)
+            status = ((body.get("data") or {}).get("productUpdate", {}).get("product") or {}).get("status")
+            logger.info("[Publish] Set status=%s for %s", status, product_gid)
     except Exception as e:
         logger.warning("[Publish] productUpdate (activate) failed for %s: %s", product_gid, e)
 
-    # ── Step 2: publishablePublish (all channels) ────────────────────────────
-    publication_ids = await _get_publication_ids()
-    if not publication_ids:
-        logger.warning("[Publish] No publication IDs found; skipping publishablePublish for %s", product_gid)
+    # ── Step 2: publishablePublish to every channel ───────────────────────
+    publications = await _get_publications()
+    if not publications:
+        logger.warning(
+            "[Publish] No publications found — product %s will remain unpublished from channels.",
+            product_gid,
+        )
         return
+
+    logger.info(
+        "[Publish] Publishing %s to %d channel(s): %s",
+        product_gid,
+        len(publications),
+        [p["name"] for p in publications],
+    )
 
     publish_mutation = """
     mutation PublishProduct($id: ID!, $input: [PublicationInput!]!) {
@@ -603,23 +679,33 @@ async def _publish_product(product_id: str) -> None:
       }
     }
     """
-    pub_input = [{"publicationId": pid} for pid in publication_ids]
+    pub_input = [{"publicationId": p["id"]} for p in publications]
     try:
         resp = await shopify_client.graphql(publish_mutation, {
             "id": product_gid,
             "input": pub_input,
         })
         body = resp.get("body", resp)
-        errors = (body.get("data") or {}).get("publishablePublish", {}).get("userErrors") or []
+        result  = (body.get("data") or {}).get("publishablePublish") or {}
+        errors  = result.get("userErrors") or []
+        pub_data = result.get("publishable") or {}
+
         if errors:
-            logger.warning("[Publish] publishablePublish errors for %s: %s", product_gid, errors)
+            logger.warning("[Publish] publishablePublish userErrors for %s: %s", product_gid, errors)
+
+        pub_count   = pub_data.get("publicationCount",          "?")
+        avail_count = pub_data.get("availablePublicationCount", "?")
+
+        if pub_count != avail_count:
+            logger.warning(
+                "[Publish] Partial publish for %s: %s/%s channels published. "
+                "Check app scopes — some channels may require additional permissions.",
+                product_gid, pub_count, avail_count,
+            )
         else:
-            result_data = (body.get("data") or {}).get("publishablePublish", {}).get("publishable") or {}
             logger.info(
-                "[Publish] Published %s to %s/%s channel(s)",
-                product_gid,
-                result_data.get("publicationCount", "?"),
-                result_data.get("availablePublicationCount", "?"),
+                "[Publish] Successfully published %s to %s/%s channel(s).",
+                product_gid, pub_count, avail_count,
             )
     except Exception as e:
         logger.warning("[Publish] publishablePublish failed for %s: %s", product_gid, e)
