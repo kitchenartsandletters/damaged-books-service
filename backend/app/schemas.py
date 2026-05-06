@@ -1,12 +1,11 @@
 # backend/app/schemas.py
 
-from typing import Optional, List, Dict, Literal
-from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Literal, Union
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
 # SHARED: Canonical Product Snapshot (read-only)
-# Only the fields we allow to be inherited into damaged product creation.
 # ---------------------------------------------------------------------------
 
 class CanonicalProductInfo(BaseModel):
@@ -16,34 +15,30 @@ class CanonicalProductInfo(BaseModel):
     vendor: Optional[str] = None
     product_type: Optional[str] = None
     tags: List[str] = []
-    price: Optional[float] = None       # canonical base price for computing discounts
+    price: Optional[float] = None
     weight: Optional[float] = None
     barcode: Optional[str] = None
-    sku: Optional[str] = None           # DBS rule: canonical sku = author
-    image_src: Optional[str] = None     # ONLY first image (cover)
+    sku: Optional[str] = None
+    image_src: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
-# DUPLICATE CHECK: Request
-# Used by /admin/check-duplicate
+# DUPLICATE CHECK
 # ---------------------------------------------------------------------------
 
 class DuplicateCheckRequest(BaseModel):
     canonical_handle: str
 
-# ---------------------------------------------------------------------------
-# DUPLICATE CHECK: Response (structured conflicts)
-# ---------------------------------------------------------------------------
 
 class DuplicateConflict(BaseModel):
-    conflict_type: str                     # "canonical_exists", "damaged_exists", "handle_conflict", …
+    conflict_type: str
     message: str
     existing_product_id: Optional[str] = None
     existing_handle: Optional[str] = None
 
 
 class DuplicateCheckResponse(BaseModel):
-    status: str                             # "ok" or "conflicts"
+    status: str
     conflicts: List[DuplicateConflict] = []
     canonical: Optional[CanonicalProductInfo] = None
     damaged_handle_sanitized: Optional[str] = None
@@ -54,7 +49,7 @@ class DuplicateCheckResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class BulkCreateInput(BaseModel):
-    type: str  # "isbn" | "product_id"
+    type: str  # "isbn" | "product_id" — used for logging only; backend cascades
     value: str
 
 
@@ -63,21 +58,17 @@ class InventorySeed(BaseModel):
     moderate: int = 0
     heavy: int = 0
 
-# ---------------------------------------------------------------------------
-# BULK CREATE: Variant injection
-# ---------------------------------------------------------------------------
 
 class VariantSeed(BaseModel):
-    condition: str                          # "light", "moderate", "heavy"
-    quantity: Optional[int] = 0             # user optional input
-    price_override: Optional[float] = None  # user may override %
+    condition: str
+    quantity: Optional[int] = 0
+    price_override: Optional[float] = None
+
 
 # ---------------------------------------------------------------------------
-# BULK CREATE: Request to /admin/bulk-create
+# BULK CREATE: Request
 # ---------------------------------------------------------------------------
 
-
-# BulkCreateRequest: `inputs` + `inventory` is canonical, `canonical_handle` is legacy
 class BulkCreateRequest(BaseModel):
     # New bulk interface (preferred)
     inputs: Optional[List[BulkCreateInput]] = None
@@ -89,8 +80,9 @@ class BulkCreateRequest(BaseModel):
 
     dry_run: bool = False
 
+
 # ---------------------------------------------------------------------------
-# BULK CREATE: Response to Admin Dashboard
+# BULK CREATE: Response
 # ---------------------------------------------------------------------------
 
 class CreatedVariantInfo(BaseModel):
@@ -111,15 +103,18 @@ class BulkCreateResult(BaseModel):
     variants: List[CreatedVariantInfo] = []
     messages: List[str] = []
 
+
 # ---------------------------------------------------------------------------
 # BULK CREATE: Confirm (execution-only)
-# Preview-derived payload ONLY
 # ---------------------------------------------------------------------------
 
 class BulkCreateConfirmItem(BaseModel):
     """
-    A single damaged variant to be created.
-    This must be derived verbatim from preview output.
+    A single damaged variant to be created or updated.
+    Derived verbatim from preview output.
+
+    canonical_product_id accepts both int and string — the frontend sends
+    the numeric ID as a string; Pydantic coerces it automatically.
     """
 
     canonical_product_id: int = Field(
@@ -143,15 +138,30 @@ class BulkCreateConfirmItem(BaseModel):
         description="Inventory quantity to seed for this damaged variant"
     )
 
+    @field_validator("canonical_product_id", mode="before")
+    @classmethod
+    def coerce_product_id(cls, v):
+        """
+        Accept numeric strings and full GIDs from the frontend.
+        e.g. "6831066579077" or "gid://shopify/Product/6831066579077" → 6831066579077
+        """
+        if isinstance(v, str):
+            raw = v.split("/")[-1]
+            try:
+                return int(raw)
+            except ValueError:
+                raise ValueError(f"canonical_product_id must be numeric, got: {v!r}")
+        return v
+
 
 class BulkCreateConfirmRequest(BaseModel):
     """
     Confirm request for /admin/bulk-create.
-    Executes ONLY what preview already computed.
+    Flat list: one item per condition per book.
     """
 
     items: List[BulkCreateConfirmItem] = Field(
         ...,
-        min_items=1,
+        min_length=1,
         description="Preview-derived items to execute"
     )
