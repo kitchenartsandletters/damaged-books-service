@@ -1741,3 +1741,132 @@ def parse_condition_from_handle(handle: str) -> str | None:
 
 def is_damaged_handle(handle: str) -> bool:
     return is_used_book_handle(handle)
+
+
+# ---------------------------------------------------------------------------
+# Live product details for sidebar enrichment (Phase 6B)
+# ---------------------------------------------------------------------------
+
+async def get_damaged_product_details(product_id: str) -> dict:
+    """
+    Fetch live Shopify data for the DamagedBooksTable sidebar.
+    Returns publishing status per channel, taxonomy category, and
+    per-variant weight + inventory quantity.
+
+    Called lazily on sidebar open — always live, never cached.
+    """
+    raw_id = str(product_id).split("/")[-1]
+    product_gid = f"gid://shopify/Product/{raw_id}"
+
+    query = """
+    query DamagedProductDetails($id: ID!) {
+      product(id: $id) {
+        id
+        status
+        publishedAt
+        category {
+          id
+          name
+          fullName
+        }
+        resourcePublications(first: 10) {
+          edges {
+            node {
+              publication { id name }
+              isPublished
+              publishDate
+            }
+          }
+        }
+        variants(first: 5) {
+          edges {
+            node {
+              id
+              title
+              inventoryQuantity
+              inventoryItem {
+                measurement {
+                  weight { value unit }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    resp = await shopify_client.graphql(query, {"id": product_gid})
+    body = resp.get("body", resp)
+
+    gql_errors = body.get("errors") or []
+    if gql_errors:
+        logger.warning("[ProductDetails] GQL errors for %s: %s", product_gid, gql_errors)
+        raise RuntimeError(f"Shopify GQL errors: {gql_errors}")
+
+    product = (body.get("data") or {}).get("product") or {}
+    if not product:
+        raise RuntimeError(f"Product not found: {product_gid}")
+
+    # ── Channels ──────────────────────────────────────────────────────────────
+    channels = []
+    for edge in ((product.get("resourcePublications") or {}).get("edges") or []):
+        node = edge.get("node") or {}
+        pub  = node.get("publication") or {}
+        channels.append({
+            "name":         pub.get("name") or "Unknown",
+            "is_published": bool(node.get("isPublished")),
+            "publish_date": node.get("publishDate"),
+        })
+
+    online_store_published = any(
+        c["name"].lower() in ("online store", "online-store") and c["is_published"]
+        for c in channels
+    )
+
+    # ── Variants + weight ─────────────────────────────────────────────────────
+    variants = []
+    weight_value: float | None = None
+    weight_unit: str | None = None
+
+    for edge in ((product.get("variants") or {}).get("edges") or []):
+        node = edge.get("node") or {}
+        w_node = (
+            (node.get("inventoryItem") or {})
+            .get("measurement") or {}
+        ).get("weight") or {}
+
+        w_val  = w_node.get("value")
+        w_unit = (w_node.get("unit") or "").upper()
+
+        if weight_value is None and w_val is not None:
+            weight_value = float(w_val)
+            weight_unit  = _WEIGHT_UNIT_MAP.get(w_unit, w_unit.lower() or "g")
+
+        variants.append({
+            "id":                 str(node.get("id") or "").split("/")[-1],
+            "title":              node.get("title"),
+            "inventory_quantity": node.get("inventoryQuantity"),
+            "weight":             float(w_val) if w_val is not None else None,
+            "weight_unit":        _WEIGHT_UNIT_MAP.get(w_unit, w_unit.lower() or "g"),
+        })
+
+    # ── Category ──────────────────────────────────────────────────────────────
+    cat = product.get("category") or {}
+    category = {
+        "id":        cat.get("id"),
+        "name":      cat.get("name"),
+        "full_name": cat.get("fullName"),
+    } if cat.get("id") else None
+
+    return {
+        "product_id":             raw_id,
+        "status":                 (product.get("status") or "").lower(),
+        "published_at":           product.get("publishedAt"),
+        "online_store_published": online_store_published,
+        "channels":               channels,
+        "category":               category,
+        "weight":                 weight_value,
+        "weight_unit":            weight_unit,
+        "variants":               variants,
+    }

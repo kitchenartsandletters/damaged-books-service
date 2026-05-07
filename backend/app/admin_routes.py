@@ -182,6 +182,30 @@ async def bulk_create(
     return JSONResponse(result)
 
 
+@router.get("/product-details/{product_id}")
+async def get_product_details(
+    product_id: str,
+    ok: bool = Depends(require_admin_token),
+):
+    """
+    Fetch live Shopify data for the DamagedBooksTable sidebar.
+    Returns publishing status, sales channels, taxonomy category,
+    weight, and per-variant inventory.
+
+    Called lazily on sidebar open — not cached, always reflects
+    current Shopify state.
+    """
+    try:
+        details = await product_service.get_damaged_product_details(product_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("[Admin] /admin/product-details/%s failed", product_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return JSONResponse(details)
+
+
 @router.get("/creation-log")
 async def get_creation_log(
     ok=Depends(require_admin_token),
