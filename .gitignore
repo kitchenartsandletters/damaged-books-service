@@ -29,3 +29,8 @@ railway.json
 tests/
 tests/cleanup_seeded_products.py
 tests/dbs_pytest.py
+
+.env
+.env
+.env.template
+.env.example
