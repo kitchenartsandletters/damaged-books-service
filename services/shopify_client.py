@@ -10,27 +10,34 @@ import httpx
 import asyncio
 from urllib.parse import urlencode
 from config import get_settings
+from shopify_token import get_token_manager
 
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
 SHOP_URL = settings.SHOP_URL
-SHOPIFY_ACCESS_TOKEN = settings.SHOPIFY_ACCESS_TOKEN
-SHOPIFY_API_SECRET = settings.SHOPIFY_API_SECRET
-
-API_VERSION = "2025-01"
+API_VERSION = settings.SHOPIFY_API_VERSION
+# Store-level webhook signing secret (admin Settings -> Notifications). This is
+# NOT the app Client secret — it signs store-owned webhooks, is independent of
+# any app, and is unaffected by the app migration. Used only for HMAC checks.
+SHOPIFY_WEBHOOK_SECRET = settings.SHOPIFY_WEBHOOK_SECRET
 
 BASE_URL = f"https://{SHOP_URL}/admin/api/{API_VERSION}"
 
-if not SHOP_URL or not SHOPIFY_ACCESS_TOKEN:
-    raise ValueError("Missing required Shopify config: SHOP_URL or SHOPIFY_ACCESS_TOKEN")
+if not SHOP_URL:
+    raise ValueError("Missing required Shopify config: SHOP_URL")
 
 class ShopifyClient:
     def __init__(self):
         self.base_url = f"https://{SHOP_URL}/admin/api/{API_VERSION}"
-        self.headers = {
+        self._tokens = get_token_manager()
+
+    async def _auth_headers(self) -> dict:
+        """Headers carrying a freshly-resolved client-credentials access token."""
+        token = await self._tokens.get_token()
+        return {
             "Content-Type": "application/json",
-            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN
+            "X-Shopify-Access-Token": token,
         }
 
     async def get_variants_by_inventory_item_id(self, inventory_item_id: int | str) -> list[dict]:
@@ -67,16 +74,19 @@ class ShopifyClient:
         POST /admin/api/{ver}/graphql.json
         """
         url = f"{self.base_url}/graphql.json"
-        headers = {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-        }
         payload = {"query": query, "variables": variables}
         async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=headers, json=payload, timeout=10.0)
-            logger.info(f"[Shopify GQL] POST {url} -> {resp.status_code}")
-            resp.raise_for_status()
-            return resp.json()
+            for attempt in range(2):
+                headers = await self._auth_headers()
+                resp = await client.post(url, headers=headers, json=payload, timeout=10.0)
+                logger.info(f"[Shopify GQL] POST {url} -> {resp.status_code}")
+                if resp.status_code == 401 and attempt == 0:
+                    logger.warning("[Shopify GQL] 401; refreshing token and retrying once.")
+                    self._tokens.invalidate()
+                    await self._tokens.get_token(force_refresh=True)
+                    continue
+                resp.raise_for_status()
+                return resp.json()
 
     async def graphql(self, query: str, variables: dict) -> dict:
         return await self.graph(query, variables)
@@ -144,15 +154,22 @@ class ShopifyClient:
         async with httpx.AsyncClient() as client:
             for attempt in range(3):  # max 3 retries
                 try:
+                    headers = await self._auth_headers()
                     response = await client.request(
                         method=method.upper(),
                         url=url,
-                        headers=self.headers,
+                        headers=headers,
                         json=data if method in ["POST", "PUT"] else None,
                         timeout=10.0
                     )
 
                     logger.info(f"[Shopify] {method.upper()} {url} -> {response.status_code}")
+
+                    if response.status_code == 401:
+                        logger.warning("[Shopify] 401; refreshing token and retrying.")
+                        self._tokens.invalidate()
+                        await self._tokens.get_token(force_refresh=True)
+                        continue
 
                     if response.status_code == 429:
                         retry_after = int(response.headers.get("Retry-After", "1"))
@@ -194,7 +211,7 @@ class ShopifyClient:
 
     def verify_webhook(self, hmac_header: str, data: bytes) -> bool:
         digest = hmac.new(
-            SHOPIFY_API_SECRET.encode("utf-8"),
+            SHOPIFY_WEBHOOK_SECRET.encode("utf-8"),
             msg=data,
             digestmod=hashlib.sha256
         ).digest()

@@ -47,7 +47,7 @@ async def handle_inventory_webhook(request: Request):
     if not hmac_header:
         raise HTTPException(status_code=400, detail="Missing HMAC header")
 
-    shopify_secret = settings.SHOPIFY_API_SECRET
+    shopify_secret = settings.SHOPIFY_WEBHOOK_SECRET   # was settings.SHOPIFY_API_SECRET
     if not shopify_secret:
         raise HTTPException(status_code=500, detail="Missing server secret for webhook validation")
 
