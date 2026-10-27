@@ -12,51 +12,68 @@ logger = logging.getLogger(__name__)
 
 SHOPIFY_LOCATION_ID = os.getenv("SHOPIFY_LOCATION_ID")
 
-async def apply_product_rules_with_product(product_id: str, damaged_handle: str, canonical_handle: str) -> None:
+class ProductRulesError(Exception):
+    pass
+
+
+def _publish_errors(result) -> list[str]:
+    """Problems in a productUpdate result. None means the client swallowed an error."""
+    if result is None:
+        return ["productUpdate request failed (see ShopifyClient error log)"]
+    body = result.get("body", result) if isinstance(result, dict) else {}
+    errs = [str(e.get("message", e)) for e in (body.get("errors") or [])]
+    data = (body.get("data") or {}).get("productUpdate") or {}
+    errs += [f"{e.get('field')}: {e.get('message')}" for e in (data.get("userErrors") or [])]
+    if not errs and not data.get("product"):
+        errs.append(f"productUpdate returned no product: {body}")
+    return errs
+
+
+async def apply_product_rules_with_product(product_id: str, damaged_handle: str, canonical_handle: str) -> dict:
     """
     Publish/unpublish and manage redirects at the product level:
-      - If ANY variant in-stock → publish damaged product, remove redirect.
-      - If ALL variants OOS → unpublish damaged product, create redirect to canonical.
+      - If ANY variant in-stock -> publish damaged product, remove ALL redirects.
+      - If ALL variants OOS     -> unpublish damaged product, ensure exactly ONE redirect.
     Uses our damaged inventory view to compute aggregate availability.
+
+    Raises ProductRulesError if any step fails, after attempting every step,
+    so callers (reconcile worker, webhook route) can count and surface it.
     """
+    from services import damaged_inventory_repo  # local import to avoid cycles
+    rows_resp = damaged_inventory_repo.list_view(limit=2000, in_stock=None)
+    rows = rows_resp.data or []
+    product_rows = [r for r in rows if (r.get("handle") or "").lower() == damaged_handle.lower()]
+    any_in_stock = any(coerce_quantity(r.get("available")) > 0 for r in product_rows)
+
+    problems: list[str] = []
+    summary = {"handle": damaged_handle, "in_stock": any_in_stock}
+
+    # 1) publish state
     try:
-        from services import damaged_inventory_repo  # local import to avoid cycles
-        rows_resp = damaged_inventory_repo.list_view(limit=2000, in_stock=None)
-        rows = rows_resp.data or []
-        product_rows = [r for r in rows if (r.get("handle") or "").lower() == damaged_handle.lower()]
-        any_in_stock = any(coerce_quantity(r.get("available")) > 0 for r in product_rows)
-
-        if any_in_stock:
-            # Publish damaged product and remove redirect if present
-            await shopify_client.set_product_publish_status(product_id, True)
-            existing = await redirect_service.find_redirect_by_path(damaged_handle)
-            if existing:
-                deleted = await redirect_service.delete_redirect(str(existing.get("id")))
-                if deleted is not True and deleted not in (200, 204):
-                    logger.warning(f"[Redirect] Failed to delete redirect id={existing.get('id')} for {damaged_handle}")
-                    notification_service.notify(
-                        "warning",
-                        "Redirect Removal Failed",
-                        f"Could not remove redirect for {damaged_handle} (id={existing.get('id')})"
-                    )
-        else:
-            # Unpublish damaged product and ensure redirect exists
-            await shopify_client.set_product_publish_status(product_id, False)
-            existing = await redirect_service.find_redirect_by_path(damaged_handle)
-            if not existing:
-                created = await redirect_service.create_redirect(damaged_handle, canonical_handle)
-                if created is None:
-                    logger.warning(f"[Redirect] Creation returned empty/invalid result for {damaged_handle} → {canonical_handle}")
-                    notification_service.notify(
-                        "warning",
-                        "Redirect Creation Failed",
-                        f"Could not create redirect from {damaged_handle} to {canonical_handle}"
-                    )
-                else:
-                    logger.info(f"[Redirect] Created id={created.get('id')} from {damaged_handle} → {canonical_handle}")
-
+        result = await shopify_client.set_product_publish_status(product_id, any_in_stock)
+        errs = _publish_errors(result)
+        if errs:
+            problems.append(f"{'publish' if any_in_stock else 'unpublish'} failed: {'; '.join(errs)}")
     except Exception as e:
-        logger.warning(f"[UsedBookManager] apply_product_rules_with_product error: {e}")
+        problems.append(f"publish status error: {type(e).__name__}: {e}")
+
+    # 2) redirects (attempted even if step 1 failed)
+    try:
+        if any_in_stock:
+            summary["redirects_deleted"] = await redirect_service.remove_all_redirects(damaged_handle)
+        else:
+            summary.update(await redirect_service.ensure_single_redirect(damaged_handle, canonical_handle))
+    except Exception as e:
+        problems.append(f"redirect error: {type(e).__name__}: {e}")
+
+    if problems:
+        msg = f"{damaged_handle}: " + " | ".join(problems)
+        logger.error(f"[UsedBookManager] product rules failed: {msg}")
+        notification_service.notify("warning", "Damaged product rules failed", msg)
+        raise ProductRulesError(msg)
+
+    logger.info(f"[UsedBookManager] product rules applied: {summary}")
+    return summary
 
 async def process_inventory_change(inventory_item_id: str, variant_id: str, product: dict, available_hint: int | None = None) -> dict:
     try:
