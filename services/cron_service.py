@@ -8,6 +8,7 @@ import os
 from services.used_book_manager import apply_product_rules_with_product
 from services import seo_service
 from services.inventory_service import resolve_by_inventory_item_id
+from services.conditions import normalize_condition_key
 
 logger = logging.getLogger(__name__)
 supabase = get_client()
@@ -23,6 +24,7 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
     inspected = 0
     updated = 0
     skipped = 0
+    errors: list[str] = []
 
     if not SHOPIFY_LOCATION_ID:
         return {"inspected": 0, "updated": 0, "skipped": 0, "note": "missing SHOPIFY_LOCATION_ID"}
@@ -59,19 +61,26 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
             for option in selected_options:
                 if option.get("name") == "Condition":
                     condition_raw = option.get("value")
-                    if condition_raw:
-                        condition_key = condition_raw.lower().replace(" ", "_")
-                    condition = condition_raw
                     break
 
-            logger.info(f"Upserting inventory item {inv_id} with condition={condition_raw}, condition_raw={condition_raw}, condition_key={condition_key}, available={available}, sku={sku}, barcode={barcode}")
+            # Canonicalise ("Light Damage" -> "light"). Unknown values raise.
+            condition_key = normalize_condition_key(condition_raw)
+            if condition_key is None:
+                # No Condition option on the variant: keep what we already
+                # know rather than NULLing a valid stored condition.
+                condition_key = normalize_condition_key(r.get("condition_key") or r.get("condition"))
+                condition_raw = condition_raw or r.get("condition_raw")
+                logger.warning(f"[Reconcile] inventory_item_id={inv_id} has no Condition option; keeping stored condition={condition_key!r}")
+            condition = condition_key
+
+            logger.info(f"Upserting inventory item {inv_id} with condition={condition_key}, condition_raw={condition_raw}, condition_key={condition_key}, available={available}, sku={sku}, barcode={barcode}")
 
             damaged_inventory_repo.upsert(
                 inventory_item_id=inv_id,
                 product_id=product_id,
                 variant_id=int(r["variant_id"]),
                 handle=handle,
-                condition=condition_raw,
+                condition=condition_key,
                 condition_raw=condition_raw,
                 condition_key=condition_key,
                 available=int(available or 0),
@@ -84,17 +93,30 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
             updated += 1
 
         except Exception as e:
-            logger.info(f"[Reconcile] skip inventory_item_id={inv_id}: {e}")
+            logger.error(f"[Reconcile] FAILED inventory_item_id={inv_id}: {type(e).__name__}: {e}")
             skipped += 1
+            errors.append(f"{type(e).__name__}: {e}")
     # Apply product-level rules once per damaged product we touched
+    # NOTE: this loop was unreachable from 2025-09-22 to the condition fix
+    # (no row was ever "touched"), which hid the missing await below.
+    rule_failures = 0
     for (pid, handle) in touched:
-        canonical = seo_service.resolve_canonical_handle(handle)
         try:
+            canonical = await seo_service.resolve_canonical_handle(handle)
             await apply_product_rules_with_product(str(pid), handle, canonical)
         except Exception as e:
-            logger.warning(f"Failed to apply product rules for {handle}: {e}")
+            rule_failures += 1
+            logger.error(f"[Reconcile] Failed to apply product rules for {handle}: {type(e).__name__}: {e}")
 
-    note = "missing SHOPIFY_LOCATION_ID" if not SHOPIFY_LOCATION_ID else None
+    note = None
+    if errors:
+        # Persist a summary so reconcile_log alone shows *why* rows failed.
+        first = errors[0][:300]
+        distinct = len(set(errors))
+        note = f"FAILED {skipped}/{inspected}; {distinct} distinct error(s); first: {first}"
+        logger.error(f"[Reconcile] {note}")
+    if rule_failures:
+        note = (note + "; " if note else "") + f"product rules failed for {rule_failures}/{len(touched)} products"
 
     try:
         supabase.schema("damaged").from_("reconcile_log").insert({
@@ -104,13 +126,16 @@ async def reconcile_damaged_inventory(batch_limit: int = 200):
             "note": note,
         }).execute()
     except Exception as e:
-        logger.warning(f"Failed to persist reconcile log: {e}")
+        logger.error(f"Failed to persist reconcile log: {e}")
 
     return {
         "inspected": inspected,
         "updated": updated,
         "skipped": skipped,
-        "note": note
+        "failed": skipped,
+        "products_touched": len(touched),
+        "rule_failures": rule_failures,
+        "note": note,
     }                           
 
 async def run_forever(interval_seconds: int = 1800):

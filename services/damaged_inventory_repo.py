@@ -1,5 +1,6 @@
 # services/damaged_inventory_repo.py
 from services.supabase_client import get_client
+from services.conditions import normalize_condition_key
 
 supabase = get_client()
 
@@ -17,6 +18,9 @@ def upsert(
     sku: str | None = None,
     barcode: str | None = None,
 ):
+    # Always send the canonical key. Raises UnknownConditionError for values
+    # outside light/moderate/heavy instead of letting Postgres reject them.
+    condition_key = normalize_condition_key(condition_key or condition_raw)
     return supabase.schema("damaged").rpc(
         "damaged_upsert_inventory",
         {
